@@ -5,6 +5,7 @@ import { supabase } from '@/lib/supabase';
 
 type Profile = {
   id: string;
+  auth_user_id?: string | null;
   full_name: string;
   email: string | null;
   phone: string | null;
@@ -73,10 +74,19 @@ type Booking = {
 const DAYS = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
 
 export default function HomePage() {
-  const [activeRole, setActiveRole] = useState<'student' | 'teacher'>('student');
+  // Estado de autenticación y perfil actual
+  const [authLoading, setAuthLoading] = useState(true);
+  const [currentUserProfile, setCurrentUserProfile] = useState<Profile | null>(null);
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authFullName, setAuthFullName] = useState('');
+  const [authPhone, setAuthPhone] = useState('');
+  const [authSubmitting, setAuthSubmitting] = useState(false);
+
+  // Datos de la app
   const [teachers, setTeachers] = useState<Profile[]>([]);
   const [students, setStudents] = useState<Profile[]>([]);
-  const [selectedStudentId, setSelectedStudentId] = useState<string>('');
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [teacherSubjects, setTeacherSubjects] = useState<TeacherSubject[]>([]);
   const [slots, setSlots] = useState<AvailabilitySlot[]>([]);
@@ -85,10 +95,6 @@ export default function HomePage() {
   const [payments, setPayments] = useState<Payment[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [banner, setBanner] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
-
-  // Registro rápido alumno
-  const [newStudentName, setNewStudentName] = useState('');
-  const [newStudentPhone, setNewStudentPhone] = useState('');
 
   // Compra horas / combos
   const [selectedPricingId, setSelectedPricingId] = useState('');
@@ -142,6 +148,42 @@ export default function HomePage() {
     setStatsTo(today);
   }, []);
 
+  async function fetchCurrentProfile(userId: string) {
+    const { data } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('auth_user_id', userId)
+      .maybeSingle();
+
+    if (data) {
+      setCurrentUserProfile(data as Profile);
+    } else {
+      setCurrentUserProfile(null);
+    }
+  }
+
+  useEffect(() => {
+    supabase.auth.getSession().then(async ({ data: { session } }) => {
+      if (session?.user) {
+        await fetchCurrentProfile(session.user.id);
+      }
+      setAuthLoading(false);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (session?.user) {
+        await fetchCurrentProfile(session.user.id);
+      } else {
+        setCurrentUserProfile(null);
+      }
+      setAuthLoading(false);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
   async function loadAll() {
     const [
       { data: profs },
@@ -179,7 +221,6 @@ export default function HomePage() {
 
     setTeachers(tList);
     setStudents(sList);
-    if (!selectedStudentId && sList.length > 0) setSelectedStudentId(sList[0].id);
     if (!adjustStudentId && sList.length > 0) setAdjustStudentId(sList[0].id);
     if (!msgTeacherId && tList.length > 0) setMsgTeacherId(tList[0].id);
     if (!urgentTeacherId && tList.length > 0) setUrgentTeacherId(tList[0].id);
@@ -202,9 +243,58 @@ export default function HomePage() {
   }
 
   useEffect(() => {
-    loadAll();
+    if (currentUserProfile) {
+      loadAll();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [currentUserProfile]);
+
+  async function handleAuthSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setBanner(null);
+    setAuthSubmitting(true);
+
+    if (authMode === 'login') {
+      const { error } = await supabase.auth.signInWithPassword({
+        email: authEmail.trim(),
+        password: authPassword,
+      });
+      if (error) {
+        setBanner({ type: 'err', text: 'Email o contraseña incorrectos: ' + error.message });
+      }
+    } else {
+      if (!authFullName.trim()) {
+        setBanner({ type: 'err', text: 'Ingresá tu nombre y apellido.' });
+        setAuthSubmitting(false);
+        return;
+      }
+      const { data, error } = await supabase.auth.signUp({
+        email: authEmail.trim(),
+        password: authPassword,
+        options: {
+          data: {
+            full_name: authFullName.trim(),
+            phone: authPhone.trim() || null,
+            role: 'student',
+          },
+        },
+      });
+      if (error) {
+        setBanner({ type: 'err', text: error.message });
+      } else if (data.user) {
+        await fetchCurrentProfile(data.user.id);
+        setBanner({ type: 'ok', text: '¡Cuenta creada! Bienvenido/a.' });
+      }
+    }
+    setAuthSubmitting(false);
+  }
+
+  async function handleLogout() {
+    await supabase.auth.signOut();
+    setCurrentUserProfile(null);
+    setBanner(null);
+    setLastReceipt(null);
+  }
 
   // Profesoras habilitadas para la materia seleccionada + carga en la fecha/hora elegida
   const eligibleTeachersWithLoad = useMemo(() => {
@@ -240,15 +330,20 @@ export default function HomePage() {
     }
   }, [eligibleTeachersWithLoad, manualTeacherOverride, bookTeacherId]);
 
-  const myCombos = useMemo(
-    () => combos.filter((c) => c.student_id === selectedStudentId && c.remaining_hours > 0),
-    [combos, selectedStudentId]
-  );
+  const myCombos = useMemo(() => {
+    if (!currentUserProfile) return [];
+    return combos.filter((c) => c.student_id === currentUserProfile.id && c.remaining_hours > 0);
+  }, [combos, currentUserProfile]);
 
   const totalComboHours = useMemo(
     () => myCombos.reduce((acc, c) => acc + Number(c.remaining_hours), 0),
     [myCombos]
   );
+
+  const myBookings = useMemo(() => {
+    if (!currentUserProfile) return [];
+    return bookings.filter((b) => b.student_id === currentUserProfile.id);
+  }, [bookings, currentUserProfile]);
 
   const currentSlotCount = useMemo(() => {
     return bookings.filter(
@@ -314,44 +409,16 @@ export default function HomePage() {
     };
   }, [payments, bookings, subjects, teachers, statsFrom, statsTo]);
 
-  async function handleCreateStudent(e: React.FormEvent) {
-    e.preventDefault();
-    if (!newStudentName.trim()) return;
-    const { data, error } = await supabase
-      .from('profiles')
-      .insert({
-        full_name: newStudentName.trim(),
-        phone: newStudentPhone.trim() || null,
-        role: 'student',
-        is_registered: true,
-      })
-      .select()
-      .single();
-
-    if (error) {
-      setBanner({ type: 'err', text: error.message });
-    } else {
-      setNewStudentName('');
-      setNewStudentPhone('');
-      if (data) {
-        setSelectedStudentId(data.id);
-        setAdjustStudentId(data.id);
-      }
-      setBanner({ type: 'ok', text: 'Usuario de alumno creado correctamente.' });
-      loadAll();
-    }
-  }
-
   async function handleBuyPackage(e: React.FormEvent) {
     e.preventDefault();
-    if (!selectedStudentId || !selectedPricingId) return;
+    if (!currentUserProfile || !selectedPricingId) return;
     const item = pricing.find((p) => p.id === selectedPricingId);
     if (!item) return;
 
     const status = payMethod === 'virtual_wallet' ? 'paid' : 'pending';
 
     const { error } = await supabase.from('payments').insert({
-      student_id: selectedStudentId,
+      student_id: currentUserProfile.id,
       pricing_id: item.id,
       amount: item.price,
       method: payMethod,
@@ -366,7 +433,7 @@ export default function HomePage() {
 
     if (status === 'paid' && item.kind === 'combo') {
       await supabase.from('student_combos').insert({
-        student_id: selectedStudentId,
+        student_id: currentUserProfile.id,
         pricing_id: item.id,
         total_hours: item.hours_included,
         remaining_hours: item.hours_included,
@@ -443,6 +510,7 @@ export default function HomePage() {
 
     await supabase.from('hour_adjustments').insert({
       student_id: adjustStudentId,
+      teacher_id: currentUserProfile?.id || null,
       hours_delta: Number(adjustHoursDelta),
       reason: adjustReason.trim(),
     });
@@ -457,8 +525,8 @@ export default function HomePage() {
 
   async function handleBookTurn(e: React.FormEvent) {
     e.preventDefault();
-    if (!selectedStudentId || !bookTeacherId || !bookSubjectId || !bookDate) {
-      setBanner({ type: 'err', text: 'Completá alumno, materia, profesora y fecha.' });
+    if (!currentUserProfile || !bookTeacherId || !bookSubjectId || !bookDate) {
+      setBanner({ type: 'err', text: 'Completá materia, profesora y fecha.' });
       return;
     }
 
@@ -522,7 +590,7 @@ export default function HomePage() {
       .from('bookings')
       .insert({
         receipt_code: receiptCode,
-        student_id: selectedStudentId,
+        student_id: currentUserProfile.id,
         teacher_id: bookTeacherId,
         subject_id: bookSubjectId,
         booking_date: bookDate,
@@ -611,12 +679,11 @@ export default function HomePage() {
 
   async function handleSendWhatsApp(e: React.FormEvent) {
     e.preventDefault();
-    if (!msgText.trim() || !msgTeacherId) return;
+    if (!msgText.trim() || !msgTeacherId || !currentUserProfile) return;
     const teacher = teachers.find((t) => t.id === msgTeacherId);
-    const student = students.find((s) => s.id === selectedStudentId);
 
     await supabase.from('student_messages').insert({
-      student_id: selectedStudentId || null,
+      student_id: currentUserProfile.id,
       teacher_id: msgTeacherId,
       message: msgText.trim(),
       sent_via_whatsapp: true,
@@ -624,7 +691,7 @@ export default function HomePage() {
 
     const cleanPhone = (teacher?.phone || '').replace(/\D/g, '');
     const fullText = encodeURIComponent(
-      `Hola ${teacher?.full_name || 'Profe'}, soy ${student?.full_name || 'un alumno'}: ${msgText.trim()}`
+      `Hola ${teacher?.full_name || 'Profe'}, soy ${currentUserProfile.full_name}: ${msgText.trim()}`
     );
     window.open(`https://wa.me/${cleanPhone}?text=${fullText}`, '_blank');
     setMsgText('');
@@ -669,6 +736,141 @@ export default function HomePage() {
     loadAll();
   }
 
+  // ==================== PANTALLA DE CARGA ====================
+  if (authLoading) {
+    return (
+      <main className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <p className="text-slate-600 text-sm font-medium">Cargando sesión...</p>
+      </main>
+    );
+  }
+
+  // ==================== PANTALLA DE INICIO (LOGIN / REGISTRO) ====================
+  if (!currentUserProfile) {
+    return (
+      <main className="min-h-screen bg-slate-50 text-slate-900 flex items-center justify-center p-4">
+        <div className="w-full max-w-md bg-white border rounded-2xl p-6 shadow-sm space-y-5">
+          <div className="text-center space-y-1">
+            <h1 className="text-2xl font-bold">Agenda de Clases Particulares</h1>
+            <p className="text-sm text-slate-600">
+              Iniciá sesión para ingresar automáticamente a tu perfil de Alumno o Profesora
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 bg-slate-100 p-1 rounded-xl">
+            <button
+              type="button"
+              onClick={() => {
+                setAuthMode('login');
+                setBanner(null);
+              }}
+              className={`py-2 rounded-lg text-sm font-medium ${
+                authMode === 'login' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-600'
+              }`}
+            >
+              Iniciar Sesión
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setAuthMode('register');
+                setBanner(null);
+              }}
+              className={`py-2 rounded-lg text-sm font-medium ${
+                authMode === 'register' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-600'
+              }`}
+            >
+              Registrarme (Alumno)
+            </button>
+          </div>
+
+          {banner && (
+            <div
+              className={`px-3 py-2.5 rounded-lg border text-xs font-medium ${
+                banner.type === 'ok'
+                  ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+                  : 'bg-red-50 border-red-300 text-red-900'
+              }`}
+            >
+              {banner.text}
+            </div>
+          )}
+
+          <form onSubmit={handleAuthSubmit} className="space-y-3">
+            {authMode === 'register' && (
+              <>
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Nombre y Apellido
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Ej: Juan Pérez"
+                    value={authFullName}
+                    onChange={(e) => setAuthFullName(e.target.value)}
+                    className="w-full border rounded-lg px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Teléfono / WhatsApp
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Ej: 5492657000000"
+                    value={authPhone}
+                    onChange={(e) => setAuthPhone(e.target.value)}
+                    className="w-full border rounded-lg px-3 py-2 text-sm"
+                  />
+                </div>
+              </>
+            )}
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                Correo Electrónico
+              </label>
+              <input
+                type="email"
+                required
+                placeholder="tu-correo@ejemplo.com"
+                value={authEmail}
+                onChange={(e) => setAuthEmail(e.target.value)}
+                className="w-full border rounded-lg px-3 py-2 text-sm"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">Contraseña</label>
+              <input
+                type="password"
+                required
+                minLength={6}
+                placeholder="Mínimo 6 caracteres"
+                value={authPassword}
+                onChange={(e) => setAuthPassword(e.target.value)}
+                className="w-full border rounded-lg px-3 py-2 text-sm"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={authSubmitting}
+              className="w-full py-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 text-white font-medium text-sm"
+            >
+              {authSubmitting
+                ? 'Ingresando...'
+                : authMode === 'login'
+                ? 'Entrar a mi Perfil'
+                : 'Crear Cuenta e Ingresar'}
+            </button>
+          </form>
+        </div>
+      </main>
+    );
+  }
+
   const upcomingBookings = bookings.filter((b) => !todayStr || b.booking_date >= todayStr);
   const pastBookings = bookings.filter((b) => Boolean(todayStr) && b.booking_date < todayStr);
   const maxSubjectTurns = Math.max(1, ...filteredStats.bySubject.map((x) => x.count));
@@ -677,36 +879,29 @@ export default function HomePage() {
   return (
     <main className="min-h-screen bg-slate-50 text-slate-900 p-4 md:p-6">
       <div className="max-w-6xl mx-auto space-y-6">
-        {/* ENCABEZADO Y SELECTOR DE ROL */}
+        {/* ENCABEZADO CON SESIÓN INICIADA */}
         <header className="bg-white border rounded-xl p-5 flex flex-wrap items-center justify-between gap-4 shadow-sm">
           <div>
             <h1 className="text-2xl font-bold">Agenda de Clases Particulares</h1>
             <p className="text-sm text-slate-600">
-              Combos y Horas • Balanceo entre profesoras • Cupo 8 alumnos • Comprobantes y WhatsApp
+              Sesión iniciada como <strong>{currentUserProfile.full_name}</strong> •{' '}
+              <span
+                className={`inline-block px-2 py-0.5 rounded text-xs font-semibold ${
+                  currentUserProfile.role === 'teacher'
+                    ? 'bg-emerald-100 text-emerald-800'
+                    : 'bg-blue-100 text-blue-800'
+                }`}
+              >
+                {currentUserProfile.role === 'teacher' ? 'Perfil Profesora' : 'Perfil Alumno'}
+              </span>
             </p>
           </div>
-          <div className="flex gap-2">
-            <button
-              onClick={() => setActiveRole('student')}
-              className={`px-4 py-2 rounded-lg font-medium border ${
-                activeRole === 'student'
-                  ? 'bg-blue-600 text-white border-blue-600'
-                  : 'bg-white text-slate-700'
-              }`}
-            >
-              Perfil Alumno
-            </button>
-            <button
-              onClick={() => setActiveRole('teacher')}
-              className={`px-4 py-2 rounded-lg font-medium border ${
-                activeRole === 'teacher'
-                  ? 'bg-emerald-600 text-white border-emerald-600'
-                  : 'bg-white text-slate-700'
-              }`}
-            >
-              Perfil Profesora
-            </button>
-          </div>
+          <button
+            onClick={handleLogout}
+            className="px-4 py-2 rounded-lg font-medium border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 text-sm"
+          >
+            Cerrar Sesión
+          </button>
         </header>
 
         {banner && (
@@ -721,59 +916,27 @@ export default function HomePage() {
           </div>
         )}
 
-        {/* ==================== VISTA ALUMNO ==================== */}
-        {activeRole === 'student' && (
+        {/* ==================== VISTA AUTOMÁTICA: ALUMNO ==================== */}
+        {currentUserProfile.role === 'student' && (
           <div className="space-y-6">
-            <section className="bg-white border rounded-xl p-5 shadow-sm grid md:grid-cols-2 gap-6">
+            <section className="bg-white border rounded-xl p-5 shadow-sm flex flex-wrap items-center justify-between gap-4">
               <div>
-                <h2 className="font-semibold text-base mb-2">1. Tu Usuario de Alumno</h2>
-                <select
-                  value={selectedStudentId}
-                  onChange={(e) => setSelectedStudentId(e.target.value)}
-                  className="w-full border rounded-lg px-3 py-2 text-sm"
-                >
-                  <option value="">-- Seleccioná tu usuario --</option>
-                  {students.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.full_name} {s.phone ? `(${s.phone})` : ''}
-                    </option>
-                  ))}
-                </select>
-                <div className="mt-3 p-3 rounded-lg bg-blue-50 border border-blue-200 text-sm">
-                  Saldo disponible en combos:{' '}
-                  <strong className="text-blue-900">{totalComboHours} hora(s)</strong>
-                </div>
+                <h2 className="font-semibold text-base">
+                  Bienvenido/a, {currentUserProfile.full_name}
+                </h2>
+                <p className="text-xs text-slate-500">
+                  {currentUserProfile.email}{' '}
+                  {currentUserProfile.phone ? `• Tel: ${currentUserProfile.phone}` : ''}
+                </p>
               </div>
-
-              <form onSubmit={handleCreateStudent} className="space-y-2">
-                <h2 className="font-semibold text-base">¿Sos nuevo? Creá tu usuario rápido</h2>
-                <div className="flex flex-col sm:flex-row gap-2">
-                  <input
-                    type="text"
-                    placeholder="Nombre y Apellido"
-                    value={newStudentName}
-                    onChange={(e) => setNewStudentName(e.target.value)}
-                    className="border rounded-lg px-3 py-2 text-sm flex-1"
-                  />
-                  <input
-                    type="text"
-                    placeholder="Teléfono / WhatsApp"
-                    value={newStudentPhone}
-                    onChange={(e) => setNewStudentPhone(e.target.value)}
-                    className="border rounded-lg px-3 py-2 text-sm flex-1"
-                  />
-                  <button
-                    type="submit"
-                    className="px-4 py-2 rounded-lg bg-slate-900 text-white text-sm font-medium"
-                  >
-                    Registrarme
-                  </button>
-                </div>
-              </form>
+              <div className="px-4 py-2.5 rounded-lg bg-blue-50 border border-blue-200 text-sm">
+                Saldo disponible en combos:{' '}
+                <strong className="text-blue-900">{totalComboHours} hora(s)</strong>
+              </div>
             </section>
 
             <section className="bg-white border rounded-xl p-5 shadow-sm space-y-4">
-              <h2 className="font-semibold text-lg">2. Cargar Horas o Comprar Combo</h2>
+              <h2 className="font-semibold text-lg">1. Cargar Horas o Comprar Combo</h2>
               <form onSubmit={handleBuyPackage} className="grid md:grid-cols-3 gap-4 items-end">
                 <div>
                   <label className="block text-xs font-medium text-slate-600 mb-1">
@@ -816,7 +979,7 @@ export default function HomePage() {
             </section>
 
             <section className="bg-white border rounded-xl p-5 shadow-sm space-y-4">
-              <h2 className="font-semibold text-lg">3. Agendar Turno en la Agenda</h2>
+              <h2 className="font-semibold text-lg">2. Agendar Turno en la Agenda</h2>
               <form onSubmit={handleBookTurn} className="grid sm:grid-cols-2 md:grid-cols-5 gap-3 items-end">
                 <div>
                   <label className="block text-xs font-medium text-slate-600 mb-1">Materia</label>
@@ -954,6 +1117,31 @@ export default function HomePage() {
               )}
             </section>
 
+            {/* Mis turnos agendados */}
+            <section className="bg-white border rounded-xl p-5 shadow-sm space-y-3">
+              <h2 className="font-semibold text-lg">3. Mis Turnos Agendados ({myBookings.length})</h2>
+              <div className="space-y-2 text-sm">
+                {myBookings.map((b) => (
+                  <div key={b.id} className="border rounded-lg p-3 flex flex-wrap justify-between items-center gap-2">
+                    <div>
+                      <div className="font-semibold">
+                        {b.booking_date} • {b.start_time.slice(0, 5)}hs — {b.subjects?.name}
+                      </div>
+                      <div className="text-xs text-slate-600">
+                        Profesora: {b.teacher?.full_name} • Comprobante: {b.receipt_code}
+                      </div>
+                    </div>
+                    <span className="text-xs px-2.5 py-1 rounded bg-slate-100 font-medium">
+                      {b.modality === 'combo' ? 'Combo' : 'Hora suelta'}
+                    </span>
+                  </div>
+                ))}
+                {myBookings.length === 0 && (
+                  <p className="text-xs text-slate-500">Todavía no tenés turnos reservados.</p>
+                )}
+              </div>
+            </section>
+
             <section className="bg-white border rounded-xl p-5 shadow-sm space-y-3">
               <h2 className="font-semibold text-lg">4. Enviar Mensaje a una Profesora (vía WhatsApp)</h2>
               <form onSubmit={handleSendWhatsApp} className="grid md:grid-cols-4 gap-3">
@@ -986,8 +1174,8 @@ export default function HomePage() {
           </div>
         )}
 
-        {/* ==================== VISTA PROFESORA ==================== */}
-        {activeRole === 'teacher' && (
+        {/* ==================== VISTA AUTOMÁTICA: PROFESORA ==================== */}
+        {currentUserProfile.role === 'teacher' && (
           <div className="space-y-6">
             {/* SECTOR DE GRÁFICOS Y ANÁLISIS POR PERÍODO */}
             <section className="bg-white border rounded-xl p-5 shadow-sm space-y-5">
@@ -1040,7 +1228,6 @@ export default function HomePage() {
               </div>
 
               <div className="grid md:grid-cols-3 gap-6 text-sm">
-                {/* Gráfico 1: Medios de pago */}
                 <div className="border rounded-xl p-4 space-y-3">
                   <h3 className="font-semibold">Medios de Pago (Monto Cobrado)</h3>
                   <div className="space-y-2">
@@ -1083,7 +1270,6 @@ export default function HomePage() {
                   </div>
                 </div>
 
-                {/* Gráfico 2: Materias más concurridas */}
                 <div className="border rounded-xl p-4 space-y-3">
                   <h3 className="font-semibold">Materias Más Concurridas</h3>
                   <div className="space-y-2">
@@ -1104,7 +1290,6 @@ export default function HomePage() {
                   </div>
                 </div>
 
-                {/* Gráfico 3: Carga por profesora */}
                 <div className="border rounded-xl p-4 space-y-3">
                   <h3 className="font-semibold">Turnos por Profesora</h3>
                   <div className="space-y-2">
