@@ -174,11 +174,17 @@ export default function HomePage() {
   const [adjustHoursDelta, setAdjustHoursDelta] = useState<number>(1);
   const [adjustReason, setAdjustReason] = useState('');
 
-  // Profesora: nueva franja horaria (siempre ligada a la profesora logueada)
+  // Profesora: nueva franja horaria y edición de franja propia
   const [slotDay, setSlotDay] = useState(1);
   const [slotStart, setSlotStart] = useState('15:00');
   const [slotEnd, setSlotEnd] = useState('19:00');
   const [addingSlot, setAddingSlot] = useState(false);
+
+  const [editingSlotId, setEditingSlotId] = useState<string | null>(null);
+  const [editSlotDay, setEditSlotDay] = useState(1);
+  const [editSlotStart, setEditSlotStart] = useState('15:00');
+  const [editSlotEnd, setEditSlotEnd] = useState('19:00');
+  const [savingSlotEdit, setSavingSlotEdit] = useState(false);
 
   // Profesora: rango de fechas para gráficos y análisis
   const [statsFrom, setStatsFrom] = useState('');
@@ -345,6 +351,7 @@ export default function HomePage() {
   async function handleLogout() {
     await supabase.auth.signOut();
     setCurrentUserProfile(null);
+    setEditingSlotId(null);
     setBanner(null);
     setLastReceipt(null);
   }
@@ -868,23 +875,77 @@ export default function HomePage() {
   }
 
   async function handleToggleSlot(slot: AvailabilitySlot) {
-    if (!currentUserProfile || slot.teacher_id !== currentUserProfile.id) return;
-    await supabase
+    if (!currentUserProfile || slot.teacher_id !== currentUserProfile.id) {
+      setBanner({ type: 'err', text: 'Solo podés modificar tus propios horarios.' });
+      return;
+    }
+    const { error } = await supabase
       .from('availability_slots')
       .update({ is_active: !slot.is_active })
       .eq('id', slot.id)
       .eq('teacher_id', currentUserProfile.id);
-    loadAll();
+    if (!error) {
+      loadAll();
+    }
   }
 
-  async function handleDeleteSlot(slotId: string) {
-    if (!currentUserProfile) return;
+  function startEditingSlot(slot: AvailabilitySlot) {
+    if (!currentUserProfile || slot.teacher_id !== currentUserProfile.id) {
+      setBanner({ type: 'err', text: 'Solo podés editar tus propios horarios.' });
+      return;
+    }
+    setEditingSlotId(slot.id);
+    setEditSlotDay(slot.day_of_week);
+    setEditSlotStart(slot.start_time.slice(0, 5));
+    setEditSlotEnd(slot.end_time.slice(0, 5));
+  }
+
+  async function handleSaveEditedSlot(e: React.FormEvent) {
+    e.preventDefault();
+    if (!currentUserProfile || !editingSlotId || savingSlotEdit) return;
+    const targetSlot = slots.find((s) => s.id === editingSlotId);
+    if (!targetSlot || targetSlot.teacher_id !== currentUserProfile.id) {
+      setBanner({ type: 'err', text: 'No tenés permiso para modificar ese horario.' });
+      return;
+    }
+    if (parseTimeToHours(editSlotEnd) <= parseTimeToHours(editSlotStart)) {
+      setBanner({ type: 'err', text: 'La hora de fin debe ser posterior a la hora de inicio.' });
+      return;
+    }
+
+    setSavingSlotEdit(true);
+    const { error } = await supabase
+      .from('availability_slots')
+      .update({
+        day_of_week: editSlotDay,
+        start_time: editSlotStart + ':00',
+        end_time: editSlotEnd + ':00',
+      })
+      .eq('id', editingSlotId)
+      .eq('teacher_id', currentUserProfile.id);
+    setSavingSlotEdit(false);
+
+    if (error) {
+      setBanner({ type: 'err', text: error.message });
+    } else {
+      setEditingSlotId(null);
+      setBanner({ type: 'ok', text: 'Horario actualizado correctamente.' });
+      loadAll();
+    }
+  }
+
+  async function handleDeleteSlot(slot: AvailabilitySlot) {
+    if (!currentUserProfile || slot.teacher_id !== currentUserProfile.id) {
+      setBanner({ type: 'err', text: 'Solo podés eliminar tus propios horarios.' });
+      return;
+    }
     const { error } = await supabase
       .from('availability_slots')
       .delete()
-      .eq('id', slotId)
+      .eq('id', slot.id)
       .eq('teacher_id', currentUserProfile.id);
     if (!error) {
+      if (editingSlotId === slot.id) setEditingSlotId(null);
       setBanner({ type: 'ok', text: 'Franja horaria eliminada.' });
       loadAll();
     }
@@ -925,9 +986,22 @@ export default function HomePage() {
     }
   }
 
-  async function handleMarkAttendance(bookingId: string, attended: boolean) {
-    await supabase.from('bookings').update({ attended }).eq('id', bookingId);
-    loadAll();
+  async function handleMarkAttendance(booking: Booking, attended: boolean) {
+    if (!currentUserProfile || booking.teacher_id !== currentUserProfile.id) {
+      setBanner({
+        type: 'err',
+        text: 'Solo la profesora que dictó o tiene asignada la clase puede marcar Asistió o Faltó.',
+      });
+      return;
+    }
+    const { error } = await supabase
+      .from('bookings')
+      .update({ attended })
+      .eq('id', booking.id)
+      .eq('teacher_id', currentUserProfile.id);
+    if (!error) {
+      loadAll();
+    }
   }
 
   // ==================== PANTALLA DE CARGA ====================
@@ -1727,38 +1801,60 @@ export default function HomePage() {
                   Próximos Turnos Reservados ({upcomingBookings.length})
                 </h2>
                 <div className="space-y-2 max-h-72 overflow-y-auto text-sm">
-                  {upcomingBookings.map((b) => (
-                    <div key={b.id} className="border rounded-lg p-3 flex justify-between items-center">
-                      <div>
-                        <div className="font-semibold">
-                          {b.booking_date} • {b.start_time.slice(0, 5)}hs — {b.profiles?.full_name}
+                  {upcomingBookings.map((b) => {
+                    const isMyTurn = b.teacher_id === currentUserProfile.id;
+                    return (
+                      <div key={b.id} className="border rounded-lg p-3 flex justify-between items-center gap-2">
+                        <div>
+                          <div className="font-semibold">
+                            {b.booking_date} • {b.start_time.slice(0, 5)}hs — {b.profiles?.full_name}
+                          </div>
+                          <div className="text-xs text-slate-600">
+                            {b.subjects?.name} ({b.teacher?.full_name}) • {b.receipt_code} •{' '}
+                            {formatHoursDecimal(Number(b.duration_hours || 1))}
+                            {b.is_override && ' • [EXCEPCIÓN]'}
+                          </div>
                         </div>
-                        <div className="text-xs text-slate-600">
-                          {b.subjects?.name} ({b.teacher?.full_name}) • {b.receipt_code} •{' '}
-                          {formatHoursDecimal(Number(b.duration_hours || 1))}
-                          {b.is_override && ' • [EXCEPCIÓN]'}
+                        <div className="flex flex-col items-end gap-1">
+                          <div className="flex gap-1">
+                            <button
+                              type="button"
+                              disabled={!isMyTurn}
+                              onClick={() => handleMarkAttendance(b, true)}
+                              className={`px-2 py-1 rounded text-xs border ${
+                                !isMyTurn
+                                  ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
+                                  : b.attended === true
+                                  ? 'bg-emerald-600 text-white border-emerald-600'
+                                  : 'bg-white'
+                              }`}
+                            >
+                              Asistió
+                            </button>
+                            <button
+                              type="button"
+                              disabled={!isMyTurn}
+                              onClick={() => handleMarkAttendance(b, false)}
+                              className={`px-2 py-1 rounded text-xs border ${
+                                !isMyTurn
+                                  ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
+                                  : b.attended === false
+                                  ? 'bg-red-600 text-white border-red-600'
+                                  : 'bg-white'
+                              }`}
+                            >
+                              Faltó
+                            </button>
+                          </div>
+                          {!isMyTurn && (
+                            <span className="text-[11px] text-slate-400">
+                              Solo {b.teacher?.full_name}
+                            </span>
+                          )}
                         </div>
                       </div>
-                      <div className="flex gap-1">
-                        <button
-                          onClick={() => handleMarkAttendance(b.id, true)}
-                          className={`px-2 py-1 rounded text-xs border ${
-                            b.attended === true ? 'bg-emerald-600 text-white' : 'bg-white'
-                          }`}
-                        >
-                          Asistió
-                        </button>
-                        <button
-                          onClick={() => handleMarkAttendance(b.id, false)}
-                          className={`px-2 py-1 rounded text-xs border ${
-                            b.attended === false ? 'bg-red-600 text-white' : 'bg-white'
-                          }`}
-                        >
-                          Faltó
-                        </button>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                   {upcomingBookings.length === 0 && (
                     <p className="text-slate-500 text-xs">No hay turnos futuros agendados todavía.</p>
                   )}
@@ -1770,25 +1866,52 @@ export default function HomePage() {
                   Historial de Turnos Pasados ({pastBookings.length})
                 </h2>
                 <div className="space-y-2 max-h-72 overflow-y-auto text-sm">
-                  {pastBookings.map((b) => (
-                    <div key={b.id} className="border rounded-lg p-3 flex justify-between items-center">
-                      <div>
-                        <div className="font-semibold">
-                          {b.booking_date} • {b.profiles?.full_name}
+                  {pastBookings.map((b) => {
+                    const isMyTurn = b.teacher_id === currentUserProfile.id;
+                    return (
+                      <div key={b.id} className="border rounded-lg p-3 flex justify-between items-center gap-2">
+                        <div>
+                          <div className="font-semibold">
+                            {b.booking_date} • {b.profiles?.full_name}
+                          </div>
+                          <div className="text-xs text-slate-600">
+                            {b.subjects?.name} ({b.teacher?.full_name})
+                          </div>
                         </div>
-                        <div className="text-xs text-slate-600">
-                          {b.subjects?.name} ({b.teacher?.full_name})
+                        <div className="flex flex-col items-end gap-1">
+                          <span className="text-xs font-medium px-2 py-1 rounded bg-slate-100">
+                            {b.attended === true
+                              ? 'Asistió'
+                              : b.attended === false
+                              ? 'Faltó'
+                              : 'Sin marcar'}
+                          </span>
+                          {isMyTurn && (
+                            <div className="flex gap-1">
+                              <button
+                                type="button"
+                                onClick={() => handleMarkAttendance(b, true)}
+                                className={`px-2 py-0.5 rounded text-[11px] border ${
+                                  b.attended === true ? 'bg-emerald-600 text-white' : 'bg-white'
+                                }`}
+                              >
+                                Asistió
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleMarkAttendance(b, false)}
+                                className={`px-2 py-0.5 rounded text-[11px] border ${
+                                  b.attended === false ? 'bg-red-600 text-white' : 'bg-white'
+                                }`}
+                              >
+                                Faltó
+                              </button>
+                            </div>
+                          )}
                         </div>
                       </div>
-                      <span className="text-xs font-medium px-2 py-1 rounded bg-slate-100">
-                        {b.attended === true
-                          ? 'Asistió'
-                          : b.attended === false
-                          ? 'Faltó'
-                          : 'Sin marcar'}
-                      </span>
-                    </div>
-                  ))}
+                    );
+                  })}
                   {pastBookings.length === 0 && (
                     <p className="text-slate-500 text-xs">Aún no hay turnos pasados registrados.</p>
                   )}
@@ -1855,7 +1978,7 @@ export default function HomePage() {
                   Mis Días y Horarios Habilitados ({currentUserProfile.full_name})
                 </h2>
                 <p className="text-xs text-slate-500">
-                  Solo podés cargar, activar/desactivar o eliminar tus propios horarios.
+                  Solo podés cargar, editar, activar/desactivar o eliminar tus propios horarios.
                 </p>
               </div>
               <form onSubmit={handleAddSlot} className="flex flex-wrap gap-2 items-end">
@@ -1891,6 +2014,54 @@ export default function HomePage() {
                 </button>
               </form>
 
+              {editingSlotId && (
+                <form
+                  onSubmit={handleSaveEditedSlot}
+                  className="p-3 rounded-xl bg-amber-50/70 border border-amber-200 flex flex-wrap gap-2 items-end"
+                >
+                  <span className="text-xs font-semibold text-amber-900 w-full">
+                    Editando franja horaria propia:
+                  </span>
+                  <select
+                    value={editSlotDay}
+                    onChange={(e) => setEditSlotDay(Number(e.target.value))}
+                    className="border rounded-lg px-3 py-2 text-sm bg-white"
+                  >
+                    {DAYS.map((d, idx) => (
+                      <option key={idx} value={idx}>
+                        {d}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    type="time"
+                    value={editSlotStart}
+                    onChange={(e) => setEditSlotStart(e.target.value)}
+                    className="border rounded-lg px-3 py-2 text-sm bg-white"
+                  />
+                  <input
+                    type="time"
+                    value={editSlotEnd}
+                    onChange={(e) => setEditSlotEnd(e.target.value)}
+                    className="border rounded-lg px-3 py-2 text-sm bg-white"
+                  />
+                  <button
+                    type="submit"
+                    disabled={savingSlotEdit}
+                    className="px-3.5 py-2 rounded-lg bg-amber-600 text-white text-sm font-medium"
+                  >
+                    {savingSlotEdit ? 'Guardando...' : 'Guardar Cambios'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditingSlotId(null)}
+                    className="px-3.5 py-2 rounded-lg bg-white border text-slate-700 text-sm"
+                  >
+                    Cancelar
+                  </button>
+                </form>
+              )}
+
               <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-2 text-sm">
                 {mySlots.map((sl) => (
                   <div
@@ -1901,7 +2072,7 @@ export default function HomePage() {
                       <strong>{DAYS[sl.day_of_week]}</strong> {sl.start_time.slice(0, 5)}-
                       {sl.end_time.slice(0, 5)}
                     </span>
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex flex-wrap items-center gap-1">
                       <button
                         type="button"
                         onClick={() => handleToggleSlot(sl)}
@@ -1915,7 +2086,14 @@ export default function HomePage() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => handleDeleteSlot(sl.id)}
+                        onClick={() => startEditingSlot(sl)}
+                        className="px-2 py-1 rounded text-xs font-medium bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100"
+                      >
+                        Editar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteSlot(sl)}
                         className="px-2 py-1 rounded text-xs font-medium bg-red-50 text-red-700 border border-red-200 hover:bg-red-100"
                       >
                         Eliminar
