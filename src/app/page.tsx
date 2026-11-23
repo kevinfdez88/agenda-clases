@@ -61,8 +61,11 @@ type Booking = {
   subject_id: string;
   booking_date: string;
   start_time: string;
+  end_time?: string | null;
   duration_hours: number;
   modality: 'hourly' | 'combo';
+  student_combo_id?: string | null;
+  status?: 'confirmed' | 'cancelled' | null;
   is_override: boolean;
   is_urgent_walkin: boolean;
   attended: boolean | null;
@@ -72,6 +75,48 @@ type Booking = {
 };
 
 const DAYS = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+
+function parseTimeToHours(hhmm: string): number {
+  const [hStr, mStr] = hhmm.slice(0, 5).split(':');
+  const h = Number(hStr);
+  const m = Number(mStr || 0);
+  if (Number.isNaN(h) || Number.isNaN(m)) return NaN;
+  return h + m / 60;
+}
+
+function formatHoursDecimal(hoursVal: number): string {
+  const totalMinutes = Math.round(hoursVal * 60);
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')} hs`;
+}
+
+function getHourlyBlocks(startHHMM: string, endHHMM: string): string[] {
+  const startMin = Math.round(parseTimeToHours(startHHMM) * 60);
+  const endMin = Math.round(parseTimeToHours(endHHMM) * 60);
+  const blocks: string[] = [];
+  for (let cur = startMin; cur < endMin; cur += 60) {
+    const h = Math.floor(cur / 60);
+    const m = cur % 60;
+    blocks.push(`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`);
+  }
+  return blocks;
+}
+
+function computeEndTimeFromStartAndDuration(startHHMM: string, durationHours: number): string {
+  const startMin = Math.round(parseTimeToHours(startHHMM) * 60);
+  const endMin = startMin + Math.round(Number(durationHours || 1) * 60);
+  const h = Math.floor(endMin / 60);
+  const m = endMin % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+function getBookingStartDate(bookingDate: string, startTime: string): Date {
+  const cleanTime = startTime.slice(0, 5);
+  const [hh, mm] = cleanTime.split(':').map(Number);
+  const [yy, mo, dd] = bookingDate.split('-').map(Number);
+  return new Date(yy, (mo || 1) - 1, dd || 1, hh || 0, mm || 0, 0, 0);
+}
 
 export default function HomePage() {
   // Estado de autenticación y perfil actual
@@ -95,17 +140,19 @@ export default function HomePage() {
   const [payments, setPayments] = useState<Payment[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [banner, setBanner] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [nowTick, setNowTick] = useState<number>(() => Date.now());
 
   // Compra horas / combos
   const [selectedPricingId, setSelectedPricingId] = useState('');
   const [payMethod, setPayMethod] = useState<'virtual_wallet' | 'cash'>('virtual_wallet');
 
-  // Reserva turno alumno
+  // Reserva turno alumno (hora entrada y hora salida)
   const [bookSubjectId, setBookSubjectId] = useState('');
   const [bookTeacherId, setBookTeacherId] = useState('');
   const [manualTeacherOverride, setManualTeacherOverride] = useState(false);
   const [bookDate, setBookDate] = useState('');
-  const [bookTime, setBookTime] = useState('15:00');
+  const [bookStartTime, setBookStartTime] = useState('15:00');
+  const [bookEndTime, setBookEndTime] = useState('19:00');
   const [bookModality, setBookModality] = useState<'hourly' | 'combo'>('hourly');
   const [lastReceipt, setLastReceipt] = useState<Booking | null>(null);
 
@@ -127,11 +174,11 @@ export default function HomePage() {
   const [adjustHoursDelta, setAdjustHoursDelta] = useState<number>(1);
   const [adjustReason, setAdjustReason] = useState('');
 
-  // Profesora: nueva franja horaria
-  const [slotTeacherId, setSlotTeacherId] = useState('');
+  // Profesora: nueva franja horaria (siempre ligada a la profesora logueada)
   const [slotDay, setSlotDay] = useState(1);
   const [slotStart, setSlotStart] = useState('15:00');
   const [slotEnd, setSlotEnd] = useState('19:00');
+  const [addingSlot, setAddingSlot] = useState(false);
 
   // Profesora: rango de fechas para gráficos y análisis
   const [statsFrom, setStatsFrom] = useState('');
@@ -146,6 +193,13 @@ export default function HomePage() {
     setUrgentDate(today);
     setStatsFrom(past30);
     setStatsTo(today);
+  }, []);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setNowTick(Date.now());
+    }, 30000);
+    return () => clearInterval(interval);
   }, []);
 
   async function fetchCurrentProfile(userId: string) {
@@ -224,7 +278,6 @@ export default function HomePage() {
     if (!adjustStudentId && sList.length > 0) setAdjustStudentId(sList[0].id);
     if (!msgTeacherId && tList.length > 0) setMsgTeacherId(tList[0].id);
     if (!urgentTeacherId && tList.length > 0) setUrgentTeacherId(tList[0].id);
-    if (!slotTeacherId && tList.length > 0) setSlotTeacherId(tList[0].id);
 
     if (subjs) {
       setSubjects(subjs as Subject[]);
@@ -296,25 +349,48 @@ export default function HomePage() {
     setLastReceipt(null);
   }
 
-  // Profesoras habilitadas para la materia seleccionada + carga en la fecha/hora elegida
+  // Duración calculada entre hora de entrada y hora de salida
+  const requestedDurationHours = useMemo(() => {
+    const startH = parseTimeToHours(bookStartTime);
+    const endH = parseTimeToHours(bookEndTime);
+    if (Number.isNaN(startH) || Number.isNaN(endH)) return 0;
+    return Math.round((endH - startH) * 100) / 100;
+  }, [bookStartTime, bookEndTime]);
+
+  const requestedBlocks = useMemo(() => {
+    if (requestedDurationHours <= 0) return [];
+    return getHourlyBlocks(bookStartTime, bookEndTime);
+  }, [bookStartTime, bookEndTime, requestedDurationHours]);
+
+  // Turnos activos (no cancelados)
+  const activeBookings = useMemo(() => {
+    return bookings.filter((b) => b.status !== 'cancelled');
+  }, [bookings]);
+
+  // Profesoras habilitadas para la materia seleccionada + carga en el rango de horas elegido
   const eligibleTeachersWithLoad = useMemo(() => {
     const allowedIds = teacherSubjects
       .filter((ts) => ts.subject_id === bookSubjectId)
       .map((ts) => ts.teacher_id);
 
+    const blocksToCheck = requestedBlocks.length > 0 ? requestedBlocks : [bookStartTime.slice(0, 5)];
+
     return teachers
       .filter((t) => allowedIds.includes(t.id))
       .map((t) => {
-        const count = bookings.filter(
-          (b) =>
-            b.teacher_id === t.id &&
-            b.booking_date === bookDate &&
-            b.start_time.slice(0, 5) === bookTime.slice(0, 5)
-        ).length;
+        const count = activeBookings.filter((b) => {
+          if (b.teacher_id !== t.id || b.booking_date !== bookDate) return false;
+          const bStart = b.start_time.slice(0, 5);
+          const bEnd = b.end_time
+            ? b.end_time.slice(0, 5)
+            : computeEndTimeFromStartAndDuration(bStart, Number(b.duration_hours || 1));
+          const bBlocks = getHourlyBlocks(bStart, bEnd);
+          return blocksToCheck.some((blk) => bBlocks.includes(blk));
+        }).length;
         return { ...t, loadCount: count };
       })
       .sort((a, b) => a.loadCount - b.loadCount);
-  }, [teacherSubjects, bookSubjectId, teachers, bookings, bookDate, bookTime]);
+  }, [teacherSubjects, bookSubjectId, teachers, activeBookings, bookDate, bookStartTime, requestedBlocks]);
 
   // Balanceo automático: selecciona la profesora con menor carga si el alumno no forzó manual
   useEffect(() => {
@@ -345,17 +421,26 @@ export default function HomePage() {
     return bookings.filter((b) => b.student_id === currentUserProfile.id);
   }, [bookings, currentUserProfile]);
 
-  const currentSlotCount = useMemo(() => {
-    return bookings.filter(
-      (b) =>
-        b.teacher_id === bookTeacherId &&
-        b.booking_date === bookDate &&
-        b.start_time.slice(0, 5) === bookTime.slice(0, 5)
-    ).length;
-  }, [bookings, bookTeacherId, bookDate, bookTime]);
-
   const selectedBookTeacher = teachers.find((t) => t.id === bookTeacherId);
   const maxCap = selectedBookTeacher?.max_capacity ?? 8;
+
+  const maxOccupancyInRange = useMemo(() => {
+    if (!bookTeacherId || !bookDate) return 0;
+    const blocksToCheck = requestedBlocks.length > 0 ? requestedBlocks : [bookStartTime.slice(0, 5)];
+    let peak = 0;
+    for (const blk of blocksToCheck) {
+      const occ = activeBookings.filter((b) => {
+        if (b.teacher_id !== bookTeacherId || b.booking_date !== bookDate) return false;
+        const bStart = b.start_time.slice(0, 5);
+        const bEnd = b.end_time
+          ? b.end_time.slice(0, 5)
+          : computeEndTimeFromStartAndDuration(bStart, Number(b.duration_hours || 1));
+        return getHourlyBlocks(bStart, bEnd).includes(blk);
+      }).length;
+      if (occ > peak) peak = occ;
+    }
+    return peak;
+  }, [activeBookings, bookTeacherId, bookDate, bookStartTime, requestedBlocks]);
 
   // Estadísticas y gráficos filtrados por período
   const filteredStats = useMemo(() => {
@@ -377,7 +462,7 @@ export default function HomePage() {
     const walletCount = paidInRange.filter((p) => p.method === 'virtual_wallet').length;
     const cashCount = paidInRange.filter((p) => p.method === 'cash').length;
 
-    const bookingsInRange = bookings.filter((b) => {
+    const bookingsInRange = activeBookings.filter((b) => {
       const afterFrom = !statsFrom || b.booking_date >= statsFrom;
       const beforeTo = !statsTo || b.booking_date <= statsTo;
       return afterFrom && beforeTo;
@@ -407,7 +492,7 @@ export default function HomePage() {
       bySubject,
       byTeacher,
     };
-  }, [payments, bookings, subjects, teachers, statsFrom, statsTo]);
+  }, [payments, activeBookings, subjects, teachers, statsFrom, statsTo]);
 
   async function handleBuyPackage(e: React.FormEvent) {
     e.preventDefault();
@@ -530,58 +615,79 @@ export default function HomePage() {
       return;
     }
 
+    if (requestedDurationHours <= 0) {
+      setBanner({
+        type: 'err',
+        text: 'La hora de salida debe ser posterior a la hora de entrada.',
+      });
+      return;
+    }
+
     const dayOfWeek = new Date(bookDate + 'T12:00:00').getDay();
-    const isDayOpen = slots.some(
+    const matchingSlot = slots.find(
       (s) =>
         s.teacher_id === bookTeacherId &&
         s.day_of_week === dayOfWeek &&
         s.is_active &&
-        bookTime >= s.start_time.slice(0, 5) &&
-        bookTime < s.end_time.slice(0, 5)
+        bookStartTime >= s.start_time.slice(0, 5) &&
+        bookEndTime <= s.end_time.slice(0, 5)
     );
 
-    if (!isDayOpen) {
+    if (!matchingSlot) {
       setBanner({
         type: 'err',
-        text: `Ese día/horario (${DAYS[dayOfWeek]} ${bookTime}) no está habilitado por la profesora.`,
+        text: `El rango ${bookStartTime} a ${bookEndTime} del día ${DAYS[dayOfWeek]} no está habilitado por la profesora.`,
       });
       return;
     }
 
-    const { data: hasSpace, error: capErr } = await supabase.rpc('check_slot_capacity', {
-      p_teacher_id: bookTeacherId,
-      p_date: bookDate,
-      p_start_time: bookTime + ':00',
-      p_force_override: false,
-    });
-
-    if (capErr) {
-      setBanner({ type: 'err', text: capErr.message });
-      return;
-    }
-    if (!hasSpace) {
-      setBanner({
-        type: 'err',
-        text: `Cupo lleno (${maxCap}/${maxCap}) para este horario. Solo una profesora puede habilitar una excepción.`,
+    for (const blk of requestedBlocks) {
+      const { data: hasSpace, error: capErr } = await supabase.rpc('check_slot_capacity', {
+        p_teacher_id: bookTeacherId,
+        p_date: bookDate,
+        p_start_time: blk + ':00',
+        p_force_override: false,
       });
-      return;
+
+      if (capErr) {
+        setBanner({ type: 'err', text: capErr.message });
+        return;
+      }
+      if (!hasSpace) {
+        setBanner({
+          type: 'err',
+          text: `Cupo lleno (${maxCap}/${maxCap}) en el bloque ${blk}. Solo una profesora puede habilitar una excepción.`,
+        });
+        return;
+      }
     }
 
     let usedComboId: string | null = null;
     if (bookModality === 'combo') {
-      const activeCombo = myCombos[0];
-      if (!activeCombo || activeCombo.remaining_hours < 1) {
+      if (totalComboHours < requestedDurationHours) {
         setBanner({
           type: 'err',
-          text: 'No tenés horas disponibles en combos. Comprá un combo o elegí modalidad Horas.',
+          text: `Necesitás ${formatHoursDecimal(requestedDurationHours)} en combos y tenés disponibles ${totalComboHours}h.`,
         });
         return;
       }
-      usedComboId = activeCombo.id;
-      await supabase
-        .from('student_combos')
-        .update({ remaining_hours: Number(activeCombo.remaining_hours) - 1 })
-        .eq('id', activeCombo.id);
+
+      let remainingToDeduct = requestedDurationHours;
+      const orderedCombos = [...myCombos].sort(
+        (a, b) => Number(b.remaining_hours) - Number(a.remaining_hours)
+      );
+
+      for (const c of orderedCombos) {
+        if (remainingToDeduct <= 0) break;
+        const currentRem = Number(c.remaining_hours);
+        const deductHere = Math.min(currentRem, remainingToDeduct);
+        if (!usedComboId) usedComboId = c.id;
+        await supabase
+          .from('student_combos')
+          .update({ remaining_hours: Math.max(0, currentRem - deductHere) })
+          .eq('id', c.id);
+        remainingToDeduct = Math.round((remainingToDeduct - deductHere) * 100) / 100;
+      }
     }
 
     const receiptCode = 'CMP-' + Math.floor(100000 + Math.random() * 900000);
@@ -594,10 +700,12 @@ export default function HomePage() {
         teacher_id: bookTeacherId,
         subject_id: bookSubjectId,
         booking_date: bookDate,
-        start_time: bookTime + ':00',
-        duration_hours: 1,
+        start_time: bookStartTime + ':00',
+        end_time: bookEndTime + ':00',
+        duration_hours: requestedDurationHours,
         modality: bookModality,
         student_combo_id: usedComboId,
+        status: 'confirmed',
         is_override: false,
         is_urgent_walkin: false,
       })
@@ -609,9 +717,69 @@ export default function HomePage() {
     } else {
       setLastReceipt(inserted as unknown as Booking);
       setManualTeacherOverride(false);
-      setBanner({ type: 'ok', text: `Turno reservado con éxito. Comprobante: ${receiptCode}` });
+      setBanner({
+        type: 'ok',
+        text: `Turno reservado (${bookStartTime} a ${bookEndTime}, ${formatHoursDecimal(requestedDurationHours)}). Comprobante: ${receiptCode}`,
+      });
       loadAll();
     }
+  }
+
+  async function handleCancelBooking(booking: Booking) {
+    if (!currentUserProfile || booking.status === 'cancelled') return;
+
+    const startDate = getBookingStartDate(booking.booking_date, booking.start_time);
+    const diffHours = (startDate.getTime() - Date.now()) / (1000 * 60 * 60);
+
+    if (diffHours < 2) {
+      setBanner({
+        type: 'err',
+        text: 'Ya faltan menos de 2 horas para el inicio del turno: no se puede cancelar. Debés asistir al turno o se perderán las horas.',
+      });
+      return;
+    }
+
+    const { error } = await supabase
+      .from('bookings')
+      .update({ status: 'cancelled' })
+      .eq('id', booking.id);
+
+    if (error) {
+      setBanner({ type: 'err', text: error.message });
+      return;
+    }
+
+    const hoursToRefund = Number(booking.duration_hours || 1);
+
+    if (booking.modality === 'combo' && hoursToRefund > 0) {
+      const targetCombo =
+        combos.find((c) => c.id === booking.student_combo_id) ||
+        combos.find((c) => c.student_id === booking.student_id);
+
+      if (targetCombo) {
+        await supabase
+          .from('student_combos')
+          .update({
+            remaining_hours: Number(targetCombo.remaining_hours) + hoursToRefund,
+          })
+          .eq('id', targetCombo.id);
+      } else {
+        await supabase.from('student_combos').insert({
+          student_id: booking.student_id,
+          total_hours: hoursToRefund,
+          remaining_hours: hoursToRefund,
+        });
+      }
+    }
+
+    setBanner({
+      type: 'ok',
+      text:
+        booking.modality === 'combo'
+          ? `Turno ${booking.receipt_code} cancelado a tiempo. Se devolvieron ${formatHoursDecimal(hoursToRefund)} a tu saldo.`
+          : `Turno ${booking.receipt_code} cancelado a tiempo. El cupo quedó liberado.`,
+    });
+    loadAll();
   }
 
   async function handleUrgentBooking(e: React.FormEvent) {
@@ -659,6 +827,7 @@ export default function HomePage() {
       start_time: urgentTime + ':00',
       duration_hours: 1,
       modality: 'hourly',
+      status: 'confirmed',
       is_override: forceOverride,
       is_urgent_walkin: true,
     });
@@ -699,25 +868,50 @@ export default function HomePage() {
   }
 
   async function handleToggleSlot(slot: AvailabilitySlot) {
+    if (!currentUserProfile || slot.teacher_id !== currentUserProfile.id) return;
     await supabase
       .from('availability_slots')
       .update({ is_active: !slot.is_active })
-      .eq('id', slot.id);
+      .eq('id', slot.id)
+      .eq('teacher_id', currentUserProfile.id);
     loadAll();
+  }
+
+  async function handleDeleteSlot(slotId: string) {
+    if (!currentUserProfile) return;
+    const { error } = await supabase
+      .from('availability_slots')
+      .delete()
+      .eq('id', slotId)
+      .eq('teacher_id', currentUserProfile.id);
+    if (!error) {
+      setBanner({ type: 'ok', text: 'Franja horaria eliminada.' });
+      loadAll();
+    }
   }
 
   async function handleAddSlot(e: React.FormEvent) {
     e.preventDefault();
-    if (!slotTeacherId) return;
-    await supabase.from('availability_slots').insert({
-      teacher_id: slotTeacherId,
+    if (!currentUserProfile || currentUserProfile.role !== 'teacher' || addingSlot) return;
+    if (parseTimeToHours(slotEnd) <= parseTimeToHours(slotStart)) {
+      setBanner({ type: 'err', text: 'La hora de fin debe ser posterior a la hora de inicio.' });
+      return;
+    }
+
+    setAddingSlot(true);
+    const { error } = await supabase.from('availability_slots').insert({
+      teacher_id: currentUserProfile.id,
       day_of_week: slotDay,
       start_time: slotStart + ':00',
       end_time: slotEnd + ':00',
       is_active: true,
     });
-    setBanner({ type: 'ok', text: 'Franja horaria habilitada.' });
-    loadAll();
+    setAddingSlot(false);
+
+    if (!error) {
+      setBanner({ type: 'ok', text: 'Franja horaria habilitada para tu perfil.' });
+      loadAll();
+    }
   }
 
   async function handleUpdatePrice(id: string, newPrice: number) {
@@ -871,8 +1065,9 @@ export default function HomePage() {
     );
   }
 
-  const upcomingBookings = bookings.filter((b) => !todayStr || b.booking_date >= todayStr);
-  const pastBookings = bookings.filter((b) => Boolean(todayStr) && b.booking_date < todayStr);
+  const upcomingBookings = activeBookings.filter((b) => !todayStr || b.booking_date >= todayStr);
+  const pastBookings = activeBookings.filter((b) => Boolean(todayStr) && b.booking_date < todayStr);
+  const mySlots = slots.filter((sl) => sl.teacher_id === currentUserProfile.id);
   const maxSubjectTurns = Math.max(1, ...filteredStats.bySubject.map((x) => x.count));
   const maxTeacherTurns = Math.max(1, ...filteredStats.byTeacher.map((x) => x.count));
 
@@ -980,7 +1175,7 @@ export default function HomePage() {
 
             <section className="bg-white border rounded-xl p-5 shadow-sm space-y-4">
               <h2 className="font-semibold text-lg">2. Agendar Turno en la Agenda</h2>
-              <form onSubmit={handleBookTurn} className="grid sm:grid-cols-2 md:grid-cols-5 gap-3 items-end">
+              <form onSubmit={handleBookTurn} className="grid sm:grid-cols-2 md:grid-cols-6 gap-3 items-end">
                 <div>
                   <label className="block text-xs font-medium text-slate-600 mb-1">Materia</label>
                   <select
@@ -1033,13 +1228,27 @@ export default function HomePage() {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">Hora</label>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Hora entrada</label>
                   <input
                     type="time"
                     step={3600}
-                    value={bookTime}
+                    value={bookStartTime}
                     onChange={(e) => {
-                      setBookTime(e.target.value);
+                      setBookStartTime(e.target.value);
+                      setManualTeacherOverride(false);
+                    }}
+                    className="w-full border rounded-lg px-3 py-2 text-sm"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Hora salida</label>
+                  <input
+                    type="time"
+                    step={3600}
+                    value={bookEndTime}
+                    onChange={(e) => {
+                      setBookEndTime(e.target.value);
                       setManualTeacherOverride(false);
                     }}
                     className="w-full border rounded-lg px-3 py-2 text-sm"
@@ -1058,8 +1267,16 @@ export default function HomePage() {
                   </select>
                 </div>
 
-                <div className="sm:col-span-2 md:col-span-5 flex flex-wrap items-center justify-between gap-3 pt-2">
-                  <div className="text-xs text-slate-600">
+                <div className="sm:col-span-2 md:col-span-6 flex flex-wrap items-center justify-between gap-3 pt-2">
+                  <div className="text-xs text-slate-600 space-y-1 sm:space-y-0">
+                    <span className="inline-block mr-3 px-2.5 py-0.5 rounded bg-slate-100 text-slate-800 font-medium border">
+                      Duración a descontar:{' '}
+                      <strong>
+                        {requestedDurationHours > 0
+                          ? formatHoursDecimal(requestedDurationHours)
+                          : 'Revisá inicio/fin'}
+                      </strong>
+                    </span>
                     {eligibleTeachersWithLoad.length > 1 && !manualTeacherOverride && (
                       <span className="inline-block mr-3 px-2 py-0.5 rounded bg-blue-50 text-blue-800 border border-blue-200">
                         Asignación balanceada a quien tiene menor carga en este horario
@@ -1067,17 +1284,17 @@ export default function HomePage() {
                     )}
                     <span
                       className={`text-sm font-medium ${
-                        currentSlotCount >= maxCap ? 'text-red-600' : 'text-slate-700'
+                        maxOccupancyInRange >= maxCap ? 'text-red-600' : 'text-slate-700'
                       }`}
                     >
-                      Cupo profesora: {currentSlotCount} / {maxCap}{' '}
-                      {currentSlotCount >= maxCap ? '(CUPO LLENO)' : '(Disponible)'}
+                      Ocupación máx. en rango: {maxOccupancyInRange} / {maxCap}{' '}
+                      {maxOccupancyInRange >= maxCap ? '(CUPO LLENO)' : '(Disponible)'}
                     </span>
                   </div>
 
                   <button
                     type="submit"
-                    disabled={currentSlotCount >= maxCap}
+                    disabled={maxOccupancyInRange >= maxCap || requestedDurationHours <= 0}
                     className="px-5 py-2 rounded-lg bg-emerald-600 disabled:bg-slate-300 text-white font-medium text-sm"
                   >
                     Reservar Turno y Generar Comprobante
@@ -1106,8 +1323,16 @@ export default function HomePage() {
                     {lastReceipt.teacher?.full_name}
                   </p>
                   <p>
-                    <strong>Día y Hora:</strong> {lastReceipt.booking_date} a las{' '}
-                    {lastReceipt.start_time.slice(0, 5)} hs
+                    <strong>Día y Horario:</strong> {lastReceipt.booking_date} de{' '}
+                    {lastReceipt.start_time.slice(0, 5)} a{' '}
+                    {(
+                      lastReceipt.end_time ||
+                      computeEndTimeFromStartAndDuration(
+                        lastReceipt.start_time.slice(0, 5),
+                        Number(lastReceipt.duration_hours || 1)
+                      )
+                    ).slice(0, 5)}{' '}
+                    hs ({formatHoursDecimal(Number(lastReceipt.duration_hours || 1))})
                   </p>
                   <p>
                     <strong>Modalidad:</strong>{' '}
@@ -1119,23 +1344,79 @@ export default function HomePage() {
 
             {/* Mis turnos agendados */}
             <section className="bg-white border rounded-xl p-5 shadow-sm space-y-3">
-              <h2 className="font-semibold text-lg">3. Mis Turnos Agendados ({myBookings.length})</h2>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 className="font-semibold text-lg">3. Mis Turnos Agendados ({myBookings.length})</h2>
+                <span className="text-xs text-slate-500">
+                  Podés cancelar con 2:00 hs o más de anticipación y recuperar tus horas.
+                </span>
+              </div>
               <div className="space-y-2 text-sm">
-                {myBookings.map((b) => (
-                  <div key={b.id} className="border rounded-lg p-3 flex flex-wrap justify-between items-center gap-2">
-                    <div>
-                      <div className="font-semibold">
-                        {b.booking_date} • {b.start_time.slice(0, 5)}hs — {b.subjects?.name}
+                {myBookings.map((b) => {
+                  const isCancelled = b.status === 'cancelled';
+                  const startDate = getBookingStartDate(b.booking_date, b.start_time);
+                  const hoursUntilStart = (startDate.getTime() - nowTick) / (1000 * 60 * 60);
+                  const canCancel = !isCancelled && hoursUntilStart >= 2;
+                  const endStr = (
+                    b.end_time ||
+                    computeEndTimeFromStartAndDuration(
+                      b.start_time.slice(0, 5),
+                      Number(b.duration_hours || 1)
+                    )
+                  ).slice(0, 5);
+
+                  return (
+                    <div
+                      key={b.id}
+                      className={`border rounded-lg p-3 flex flex-wrap justify-between items-center gap-3 ${
+                        isCancelled ? 'bg-slate-50 opacity-75' : ''
+                      }`}
+                    >
+                      <div className="space-y-0.5">
+                        <div className="font-semibold flex flex-wrap items-center gap-2">
+                          <span>
+                            {b.booking_date} • {b.start_time.slice(0, 5)} a {endStr} hs —{' '}
+                            {b.subjects?.name}
+                          </span>
+                          <span className="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-800 border border-blue-200">
+                            {formatHoursDecimal(Number(b.duration_hours || 1))}
+                          </span>
+                          {isCancelled && (
+                            <span className="text-xs px-2 py-0.5 rounded bg-rose-100 text-rose-800 font-semibold">
+                              Cancelado
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs text-slate-600">
+                          Profesora: {b.teacher?.full_name} • Comprobante: {b.receipt_code} •{' '}
+                          {b.modality === 'combo' ? 'Combo' : 'Hora suelta'}
+                        </div>
+                        {!isCancelled && hoursUntilStart > 0 && hoursUntilStart < 2 && (
+                          <div className="text-xs text-amber-800 font-medium">
+                            Faltan menos de 2:00 hs para el inicio: ya no se puede cancelar (debés
+                            asistir o perderás las horas).
+                          </div>
+                        )}
                       </div>
-                      <div className="text-xs text-slate-600">
-                        Profesora: {b.teacher?.full_name} • Comprobante: {b.receipt_code}
+
+                      <div>
+                        {!isCancelled && (
+                          <button
+                            type="button"
+                            disabled={!canCancel}
+                            onClick={() => handleCancelBooking(b)}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-medium border ${
+                              canCancel
+                                ? 'bg-red-50 text-red-700 border-red-300 hover:bg-red-100'
+                                : 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
+                            }`}
+                          >
+                            {canCancel ? 'Cancelar Turno' : 'Cancelación cerrada (< 2 hs)'}
+                          </button>
+                        )}
                       </div>
                     </div>
-                    <span className="text-xs px-2.5 py-1 rounded bg-slate-100 font-medium">
-                      {b.modality === 'combo' ? 'Combo' : 'Hora suelta'}
-                    </span>
-                  </div>
-                ))}
+                  );
+                })}
                 {myBookings.length === 0 && (
                   <p className="text-xs text-slate-500">Todavía no tenés turnos reservados.</p>
                 )}
@@ -1453,7 +1734,8 @@ export default function HomePage() {
                           {b.booking_date} • {b.start_time.slice(0, 5)}hs — {b.profiles?.full_name}
                         </div>
                         <div className="text-xs text-slate-600">
-                          {b.subjects?.name} ({b.teacher?.full_name}) • {b.receipt_code}
+                          {b.subjects?.name} ({b.teacher?.full_name}) • {b.receipt_code} •{' '}
+                          {formatHoursDecimal(Number(b.duration_hours || 1))}
                           {b.is_override && ' • [EXCEPCIÓN]'}
                         </div>
                       </div>
@@ -1566,21 +1848,17 @@ export default function HomePage() {
               </div>
             </section>
 
-            {/* Días y horarios habilitados */}
+            {/* Días y horarios habilitados (solo para la profesora logueada) */}
             <section className="bg-white border rounded-xl p-5 shadow-sm space-y-4">
-              <h2 className="font-semibold text-base">Días y Horarios Habilitados para Turnos</h2>
+              <div>
+                <h2 className="font-semibold text-base">
+                  Mis Días y Horarios Habilitados ({currentUserProfile.full_name})
+                </h2>
+                <p className="text-xs text-slate-500">
+                  Solo podés cargar, activar/desactivar o eliminar tus propios horarios.
+                </p>
+              </div>
               <form onSubmit={handleAddSlot} className="flex flex-wrap gap-2 items-end">
-                <select
-                  value={slotTeacherId}
-                  onChange={(e) => setSlotTeacherId(e.target.value)}
-                  className="border rounded-lg px-3 py-2 text-sm"
-                >
-                  {teachers.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.full_name}
-                    </option>
-                  ))}
-                </select>
                 <select
                   value={slotDay}
                   onChange={(e) => setSlotDay(Number(e.target.value))}
@@ -1606,25 +1884,26 @@ export default function HomePage() {
                 />
                 <button
                   type="submit"
-                  className="px-4 py-2 rounded-lg bg-slate-900 text-white text-sm font-medium"
+                  disabled={addingSlot}
+                  className="px-4 py-2 rounded-lg bg-slate-900 disabled:bg-slate-400 text-white text-sm font-medium"
                 >
-                  Agregar Horario
+                  {addingSlot ? 'Guardando...' : 'Agregar Horario'}
                 </button>
               </form>
 
               <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-2 text-sm">
-                {slots.map((sl) => {
-                  const tName = teachers.find((t) => t.id === sl.teacher_id)?.full_name;
-                  return (
-                    <div
-                      key={sl.id}
-                      className="border rounded-lg p-2.5 flex justify-between items-center"
-                    >
-                      <span>
-                        <strong>{tName}:</strong> {DAYS[sl.day_of_week]} {sl.start_time.slice(0, 5)}-
-                        {sl.end_time.slice(0, 5)}
-                      </span>
+                {mySlots.map((sl) => (
+                  <div
+                    key={sl.id}
+                    className="border rounded-lg p-2.5 flex justify-between items-center gap-2"
+                  >
+                    <span>
+                      <strong>{DAYS[sl.day_of_week]}</strong> {sl.start_time.slice(0, 5)}-
+                      {sl.end_time.slice(0, 5)}
+                    </span>
+                    <div className="flex items-center gap-1.5">
                       <button
+                        type="button"
                         onClick={() => handleToggleSlot(sl)}
                         className={`px-2 py-1 rounded text-xs font-medium ${
                           sl.is_active
@@ -1634,9 +1913,21 @@ export default function HomePage() {
                       >
                         {sl.is_active ? 'Activo' : 'Inactivo'}
                       </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteSlot(sl.id)}
+                        className="px-2 py-1 rounded text-xs font-medium bg-red-50 text-red-700 border border-red-200 hover:bg-red-100"
+                      >
+                        Eliminar
+                      </button>
                     </div>
-                  );
-                })}
+                  </div>
+                ))}
+                {mySlots.length === 0 && (
+                  <p className="text-xs text-slate-500 col-span-full">
+                    Todavía no cargaste días y horarios habilitados.
+                  </p>
+                )}
               </div>
             </section>
 
