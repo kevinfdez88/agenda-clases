@@ -140,7 +140,7 @@ export default function HomePage() {
   const [payments, setPayments] = useState<Payment[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [banner, setBanner] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
-  const [nowTick, setNowTick] = useState<number>(() => Date.now());
+  const [nowTick, setNowTick] = useState<number>(0);
 
   // Compra horas / combos
   const [selectedPricingId, setSelectedPricingId] = useState('');
@@ -202,6 +202,7 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
+    setNowTick(Date.now());
     const interval = setInterval(() => {
       setNowTick(Date.now());
     }, 30000);
