@@ -25,32 +25,12 @@ type AvailabilitySlot = {
   is_active: boolean;
 };
 
-type PricingItem = {
-  id: string;
-  kind: 'hourly' | 'combo';
-  name: string;
-  hours_included: number;
-  price: number;
-};
-
 type StudentCombo = {
   id: string;
   student_id: string;
   total_hours: number;
   remaining_hours: number;
   pricing_catalog?: { name: string } | null;
-};
-
-type Payment = {
-  id: string;
-  student_id: string;
-  amount: number;
-  method: 'virtual_wallet' | 'cash';
-  status: 'pending' | 'paid' | 'cancelled';
-  notes: string | null;
-  created_at: string;
-  profiles?: { full_name: string } | null;
-  pricing_catalog?: { name: string; kind: string; hours_included: number } | null;
 };
 
 type Booking = {
@@ -75,6 +55,22 @@ type Booking = {
 };
 
 const DAYS = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+const GANTT_HOURS = [
+  '08:00',
+  '09:00',
+  '10:00',
+  '11:00',
+  '12:00',
+  '13:00',
+  '14:00',
+  '15:00',
+  '16:00',
+  '17:00',
+  '18:00',
+  '19:00',
+  '20:00',
+  '21:00',
+];
 
 function parseTimeToHours(hhmm: string): number {
   const [hStr, mStr] = hhmm.slice(0, 5).split(':');
@@ -118,6 +114,11 @@ function getBookingStartDate(bookingDate: string, startTime: string): Date {
   return new Date(yy, (mo || 1) - 1, dd || 1, hh || 0, mm || 0, 0, 0);
 }
 
+function addOneHour(hhmm: string): string {
+  const [h, m] = hhmm.slice(0, 5).split(':').map(Number);
+  return `${String((h + 1) % 24).padStart(2, '0')}:${String(m || 0).padStart(2, '0')}`;
+}
+
 export default function HomePage() {
   // Estado de autenticación y perfil actual
   const [authLoading, setAuthLoading] = useState(true);
@@ -135,16 +136,10 @@ export default function HomePage() {
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [teacherSubjects, setTeacherSubjects] = useState<TeacherSubject[]>([]);
   const [slots, setSlots] = useState<AvailabilitySlot[]>([]);
-  const [pricing, setPricing] = useState<PricingItem[]>([]);
   const [combos, setCombos] = useState<StudentCombo[]>([]);
-  const [payments, setPayments] = useState<Payment[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [banner, setBanner] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [nowTick, setNowTick] = useState<number>(0);
-
-  // Compra horas / combos
-  const [selectedPricingId, setSelectedPricingId] = useState('');
-  const [payMethod, setPayMethod] = useState<'virtual_wallet' | 'cash'>('virtual_wallet');
 
   // Reserva turno alumno (hora entrada y hora salida)
   const [bookSubjectId, setBookSubjectId] = useState('');
@@ -153,7 +148,7 @@ export default function HomePage() {
   const [bookDate, setBookDate] = useState('');
   const [bookStartTime, setBookStartTime] = useState('15:00');
   const [bookEndTime, setBookEndTime] = useState('19:00');
-  const [bookModality, setBookModality] = useState<'hourly' | 'combo'>('hourly');
+  const [bookModality, setBookModality] = useState<'hourly' | 'combo'>('combo');
   const [lastReceipt, setLastReceipt] = useState<Booking | null>(null);
 
   // Mensaje WhatsApp
@@ -169,9 +164,9 @@ export default function HomePage() {
   const [urgentTime, setUrgentTime] = useState('15:00');
   const [forceOverride, setForceOverride] = useState(false);
 
-  // Profesora: modificar horas de un alumno
+  // Profesora: cargar / modificar horas de un alumno (tras pago o inconveniente)
   const [adjustStudentId, setAdjustStudentId] = useState('');
-  const [adjustHoursDelta, setAdjustHoursDelta] = useState<number>(1);
+  const [adjustHoursDelta, setAdjustHoursDelta] = useState<number>(4);
   const [adjustReason, setAdjustReason] = useState('');
 
   // Profesora: nueva franja horaria y edición de franja propia
@@ -186,7 +181,8 @@ export default function HomePage() {
   const [editSlotEnd, setEditSlotEnd] = useState('19:00');
   const [savingSlotEdit, setSavingSlotEdit] = useState(false);
 
-  // Profesora: rango de fechas para gráficos y análisis
+  // Profesora: fecha de Gantt y rango de análisis de turnos
+  const [ganttDate, setGanttDate] = useState('');
   const [statsFrom, setStatsFrom] = useState('');
   const [statsTo, setStatsTo] = useState('');
   const [todayStr, setTodayStr] = useState('');
@@ -197,6 +193,7 @@ export default function HomePage() {
     setTodayStr(today);
     setBookDate(today);
     setUrgentDate(today);
+    setGanttDate(today);
     setStatsFrom(past30);
     setStatsTo(today);
   }, []);
@@ -251,23 +248,16 @@ export default function HomePage() {
       { data: subjs },
       { data: tSubjs },
       { data: avSlots },
-      { data: prices },
       { data: stCombos },
-      { data: pays },
       { data: bks },
     ] = await Promise.all([
       supabase.from('profiles').select('*').order('full_name'),
       supabase.from('subjects').select('*').order('name'),
       supabase.from('teacher_subjects').select('*'),
       supabase.from('availability_slots').select('*').order('day_of_week').order('start_time'),
-      supabase.from('pricing_catalog').select('*').eq('is_active', true).order('hours_included'),
       supabase
         .from('student_combos')
         .select('*, pricing_catalog(name)')
-        .order('created_at', { ascending: false }),
-      supabase
-        .from('payments')
-        .select('*, profiles(full_name), pricing_catalog(name, kind, hours_included)')
         .order('created_at', { ascending: false }),
       supabase
         .from('bookings')
@@ -293,12 +283,7 @@ export default function HomePage() {
     }
     if (tSubjs) setTeacherSubjects(tSubjs as TeacherSubject[]);
     if (avSlots) setSlots(avSlots as AvailabilitySlot[]);
-    if (prices) {
-      setPricing(prices as PricingItem[]);
-      if (!selectedPricingId && prices.length > 0) setSelectedPricingId(prices[0].id);
-    }
     if (stCombos) setCombos(stCombos as unknown as StudentCombo[]);
-    if (pays) setPayments(pays as unknown as Payment[]);
     if (bks) setBookings(bks as unknown as Booking[]);
   }
 
@@ -450,26 +435,61 @@ export default function HomePage() {
     return peak;
   }, [activeBookings, bookTeacherId, bookDate, bookStartTime, requestedBlocks]);
 
-  // Estadísticas y gráficos filtrados por período
-  const filteredStats = useMemo(() => {
-    const paidInRange = payments.filter((p) => {
-      const day = p.created_at.slice(0, 10);
-      const afterFrom = !statsFrom || day >= statsFrom;
-      const beforeTo = !statsTo || day <= statsTo;
-      return p.status === 'paid' && afterFrom && beforeTo;
+  // Datos para gráfico tipo Gantt de carga por horario y profesora en la fecha elegida
+  const ganttRows = useMemo(() => {
+    const targetDayOfWeek = ganttDate ? new Date(ganttDate + 'T12:00:00').getDay() : -1;
+    const dayBookings = activeBookings.filter((b) => b.booking_date === ganttDate);
+
+    return teachers.map((t) => {
+      const teacherDaySlots = slots.filter(
+        (sl) => sl.teacher_id === t.id && sl.day_of_week === targetDayOfWeek && sl.is_active
+      );
+      const cap = t.max_capacity ?? 8;
+
+      const cells = GANTT_HOURS.map((hourStart) => {
+        const hourEnd = addOneHour(hourStart);
+        const isEnabled = teacherDaySlots.some(
+          (sl) => hourStart >= sl.start_time.slice(0, 5) && hourEnd <= sl.end_time.slice(0, 5)
+        );
+
+        const matchingBookings = dayBookings.filter((b) => {
+          if (b.teacher_id !== t.id) return false;
+          const bStart = b.start_time.slice(0, 5);
+          const bEnd = b.end_time
+            ? b.end_time.slice(0, 5)
+            : computeEndTimeFromStartAndDuration(bStart, Number(b.duration_hours || 1));
+          return getHourlyBlocks(bStart, bEnd).includes(hourStart);
+        });
+
+        const studentNames = matchingBookings.map(
+          (b) => b.profiles?.full_name || 'Alumno'
+        );
+        const hasOverride = matchingBookings.some((b) => b.is_override);
+
+        return {
+          hourStart,
+          hourEnd,
+          isEnabled,
+          count: matchingBookings.length,
+          cap,
+          studentNames,
+          hasOverride,
+        };
+      });
+
+      const totalBlockAssignments = cells.reduce((acc, c) => acc + c.count, 0);
+
+      return {
+        teacher: t,
+        cap,
+        totalBlockAssignments,
+        cells,
+      };
     });
+  }, [teachers, slots, activeBookings, ganttDate]);
 
-    const totalRevenue = paidInRange.reduce((sum, p) => sum + Number(p.amount), 0);
-
-    const walletTotal = paidInRange
-      .filter((p) => p.method === 'virtual_wallet')
-      .reduce((sum, p) => sum + Number(p.amount), 0);
-    const cashTotal = paidInRange
-      .filter((p) => p.method === 'cash')
-      .reduce((sum, p) => sum + Number(p.amount), 0);
-    const walletCount = paidInRange.filter((p) => p.method === 'virtual_wallet').length;
-    const cashCount = paidInRange.filter((p) => p.method === 'cash').length;
-
+  // Estadísticas por período (sin pagos)
+  const filteredStats = useMemo(() => {
     const bookingsInRange = activeBookings.filter((b) => {
       const afterFrom = !statsFrom || b.booking_date >= statsFrom;
       const beforeTo = !statsTo || b.booking_date <= statsTo;
@@ -491,87 +511,19 @@ export default function HomePage() {
     }));
 
     return {
-      totalRevenue,
-      walletTotal,
-      cashTotal,
-      walletCount,
-      cashCount,
       totalTurns: bookingsInRange.length,
+      totalHoursBooked: bookingsInRange.reduce((sum, b) => sum + Number(b.duration_hours || 1), 0),
       bySubject,
       byTeacher,
     };
-  }, [payments, activeBookings, subjects, teachers, statsFrom, statsTo]);
-
-  async function handleBuyPackage(e: React.FormEvent) {
-    e.preventDefault();
-    if (!currentUserProfile || !selectedPricingId) return;
-    const item = pricing.find((p) => p.id === selectedPricingId);
-    if (!item) return;
-
-    const status = payMethod === 'virtual_wallet' ? 'paid' : 'pending';
-
-    const { error } = await supabase.from('payments').insert({
-      student_id: currentUserProfile.id,
-      pricing_id: item.id,
-      amount: item.price,
-      method: payMethod,
-      status,
-      notes: payMethod === 'cash' ? 'Abona en efectivo en clase' : 'Pago con billetera virtual',
-    });
-
-    if (error) {
-      setBanner({ type: 'err', text: error.message });
-      return;
-    }
-
-    if (status === 'paid' && item.kind === 'combo') {
-      await supabase.from('student_combos').insert({
-        student_id: currentUserProfile.id,
-        pricing_id: item.id,
-        total_hours: item.hours_included,
-        remaining_hours: item.hours_included,
-      });
-    }
-
-    setBanner({
-      type: 'ok',
-      text:
-        payMethod === 'virtual_wallet'
-          ? `Pago acreditado por $${item.price} (${item.name}).`
-          : `Solicitud registrada en EFECTIVO por $${item.price}. La profesora lo confirmará al recibir el dinero.`,
-    });
-    loadAll();
-  }
-
-  async function handleConfirmCashPayment(payment: Payment) {
-    const { error } = await supabase
-      .from('payments')
-      .update({ status: 'paid' })
-      .eq('id', payment.id);
-
-    if (error) {
-      setBanner({ type: 'err', text: error.message });
-      return;
-    }
-
-    if (payment.pricing_catalog?.kind === 'combo') {
-      await supabase.from('student_combos').insert({
-        student_id: payment.student_id,
-        total_hours: payment.pricing_catalog.hours_included,
-        remaining_hours: payment.pricing_catalog.hours_included,
-      });
-    }
-
-    setBanner({ type: 'ok', text: 'Pago en efectivo confirmado y acreditado.' });
-    loadAll();
-  }
+  }, [activeBookings, subjects, teachers, statsFrom, statsTo]);
 
   async function handleAdjustStudentHours(e: React.FormEvent) {
     e.preventDefault();
     if (!adjustStudentId || adjustHoursDelta === 0 || !adjustReason.trim()) {
       setBanner({
         type: 'err',
-        text: 'Seleccioná un alumno, indicá horas distintas de 0 y escribí el motivo del ajuste.',
+        text: 'Seleccioná un alumno, indicá horas distintas de 0 y escribí el motivo (ej: pago en efectivo/transferencia).',
       });
       return;
     }
@@ -608,10 +560,11 @@ export default function HomePage() {
       reason: adjustReason.trim(),
     });
 
+    const studentName = students.find((s) => s.id === adjustStudentId)?.full_name || 'Alumno';
     setAdjustReason('');
     setBanner({
       type: 'ok',
-      text: `Horas ajustadas (${adjustHoursDelta > 0 ? '+' : ''}${adjustHoursDelta}h) correctamente.`,
+      text: `Se actualizaron ${adjustHoursDelta > 0 ? '+' : ''}${adjustHoursDelta}h al perfil de ${studentName}.`,
     });
     loadAll();
   }
@@ -675,7 +628,7 @@ export default function HomePage() {
       if (totalComboHours < requestedDurationHours) {
         setBanner({
           type: 'err',
-          text: `Necesitás ${formatHoursDecimal(requestedDurationHours)} en combos y tenés disponibles ${totalComboHours}h.`,
+          text: `Necesitás ${formatHoursDecimal(requestedDurationHours)} disponibles y tenés ${totalComboHours}h. Avisale a tu profesora cuando abones para que cargue tus horas.`,
         });
         return;
       }
@@ -976,17 +929,6 @@ export default function HomePage() {
     }
   }
 
-  async function handleUpdatePrice(id: string, newPrice: number) {
-    const { error } = await supabase
-      .from('pricing_catalog')
-      .update({ price: newPrice, updated_at: new Date().toISOString() })
-      .eq('id', id);
-    if (!error) {
-      setBanner({ type: 'ok', text: 'Precio actualizado.' });
-      loadAll();
-    }
-  }
-
   async function handleMarkAttendance(booking: Booking, attended: boolean) {
     if (!currentUserProfile || booking.teacher_id !== currentUserProfile.id) {
       setBanner({
@@ -1145,6 +1087,7 @@ export default function HomePage() {
   const mySlots = slots.filter((sl) => sl.teacher_id === currentUserProfile.id);
   const maxSubjectTurns = Math.max(1, ...filteredStats.bySubject.map((x) => x.count));
   const maxTeacherTurns = Math.max(1, ...filteredStats.byTeacher.map((x) => x.count));
+  const ganttDayName = ganttDate ? DAYS[new Date(ganttDate + 'T12:00:00').getDay()] : '';
 
   return (
     <main className="min-h-screen bg-slate-50 text-slate-900 p-4 md:p-6">
@@ -1199,58 +1142,23 @@ export default function HomePage() {
                   {currentUserProfile.phone ? `• Tel: ${currentUserProfile.phone}` : ''}
                 </p>
               </div>
-              <div className="px-4 py-2.5 rounded-lg bg-blue-50 border border-blue-200 text-sm">
-                Saldo disponible en combos:{' '}
-                <strong className="text-blue-900">{totalComboHours} hora(s)</strong>
+              <div className="text-right space-y-1">
+                <div className="px-4 py-2 rounded-lg bg-blue-50 border border-blue-200 text-sm">
+                  Horas disponibles:{' '}
+                  <strong className="text-blue-900">{totalComboHours} hora(s)</strong>
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  Cuando abones tus clases, tu profesora cargará las horas en tu perfil.
+                </p>
               </div>
             </section>
 
             <section className="bg-white border rounded-xl p-5 shadow-sm space-y-4">
-              <h2 className="font-semibold text-lg">1. Cargar Horas o Comprar Combo</h2>
-              <form onSubmit={handleBuyPackage} className="grid md:grid-cols-3 gap-4 items-end">
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">
-                    Elegí Horas sueltas o Combo (más económico)
-                  </label>
-                  <select
-                    value={selectedPricingId}
-                    onChange={(e) => setSelectedPricingId(e.target.value)}
-                    className="w-full border rounded-lg px-3 py-2 text-sm"
-                  >
-                    {pricing.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name} — {p.hours_included}h — ${p.price}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">
-                    Medio de pago
-                  </label>
-                  <select
-                    value={payMethod}
-                    onChange={(e) => setPayMethod(e.target.value as 'virtual_wallet' | 'cash')}
-                    className="w-full border rounded-lg px-3 py-2 text-sm"
-                  >
-                    <option value="virtual_wallet">Billetera Virtual (Mercado Pago / Transferencia)</option>
-                    <option value="cash">Efectivo (se registra en la app)</option>
-                  </select>
-                </div>
-
-                <button
-                  type="submit"
-                  className="px-4 py-2 rounded-lg bg-blue-600 text-white font-medium text-sm"
-                >
-                  Confirmar Compra / Carga
-                </button>
-              </form>
-            </section>
-
-            <section className="bg-white border rounded-xl p-5 shadow-sm space-y-4">
-              <h2 className="font-semibold text-lg">2. Agendar Turno en la Agenda</h2>
-              <form onSubmit={handleBookTurn} className="grid sm:grid-cols-2 md:grid-cols-6 gap-3 items-end">
+              <h2 className="font-semibold text-lg">1. Agendar Turno en la Agenda</h2>
+              <form
+                onSubmit={handleBookTurn}
+                className="grid sm:grid-cols-2 md:grid-cols-6 gap-3 items-end"
+              >
                 <div>
                   <label className="block text-xs font-medium text-slate-600 mb-1">Materia</label>
                   <select
@@ -1303,7 +1211,9 @@ export default function HomePage() {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">Hora entrada</label>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">
+                    Hora entrada
+                  </label>
                   <input
                     type="time"
                     step={3600}
@@ -1317,7 +1227,9 @@ export default function HomePage() {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">Hora salida</label>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">
+                    Hora salida
+                  </label>
                   <input
                     type="time"
                     step={3600}
@@ -1331,21 +1243,23 @@ export default function HomePage() {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">Modalidad</label>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">
+                    Uso de horas
+                  </label>
                   <select
                     value={bookModality}
                     onChange={(e) => setBookModality(e.target.value as 'hourly' | 'combo')}
                     className="w-full border rounded-lg px-3 py-2 text-sm"
                   >
-                    <option value="hourly">Por Hora suelta</option>
-                    <option value="combo">Descontar de mi Combo ({totalComboHours}h disp.)</option>
+                    <option value="combo">Descontar de mis horas ({totalComboHours}h disp.)</option>
+                    <option value="hourly">Registrar sin descontar saldo</option>
                   </select>
                 </div>
 
                 <div className="sm:col-span-2 md:col-span-6 flex flex-wrap items-center justify-between gap-3 pt-2">
                   <div className="text-xs text-slate-600 space-y-1 sm:space-y-0">
                     <span className="inline-block mr-3 px-2.5 py-0.5 rounded bg-slate-100 text-slate-800 font-medium border">
-                      Duración a descontar:{' '}
+                      Duración:{' '}
                       <strong>
                         {requestedDurationHours > 0
                           ? formatHoursDecimal(requestedDurationHours)
@@ -1411,7 +1325,9 @@ export default function HomePage() {
                   </p>
                   <p>
                     <strong>Modalidad:</strong>{' '}
-                    {lastReceipt.modality === 'combo' ? 'Descuento de Combo' : 'Hora suelta'}
+                    {lastReceipt.modality === 'combo'
+                      ? 'Descuento de saldo de horas'
+                      : 'Sin descuento de saldo'}
                   </p>
                 </div>
               )}
@@ -1420,7 +1336,7 @@ export default function HomePage() {
             {/* Mis turnos agendados */}
             <section className="bg-white border rounded-xl p-5 shadow-sm space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <h2 className="font-semibold text-lg">3. Mis Turnos Agendados ({myBookings.length})</h2>
+                <h2 className="font-semibold text-lg">2. Mis Turnos Agendados ({myBookings.length})</h2>
                 <span className="text-xs text-slate-500">
                   Podés cancelar con 2:00 hs o más de anticipación y recuperar tus horas.
                 </span>
@@ -1463,7 +1379,7 @@ export default function HomePage() {
                         </div>
                         <div className="text-xs text-slate-600">
                           Profesora: {b.teacher?.full_name} • Comprobante: {b.receipt_code} •{' '}
-                          {b.modality === 'combo' ? 'Combo' : 'Hora suelta'}
+                          {b.modality === 'combo' ? 'Saldo de horas' : 'Sin descuento'}
                         </div>
                         {!isCancelled && hoursUntilStart > 0 && hoursUntilStart < 2 && (
                           <div className="text-xs text-amber-800 font-medium">
@@ -1499,7 +1415,7 @@ export default function HomePage() {
             </section>
 
             <section className="bg-white border rounded-xl p-5 shadow-sm space-y-3">
-              <h2 className="font-semibold text-lg">4. Enviar Mensaje a una Profesora (vía WhatsApp)</h2>
+              <h2 className="font-semibold text-lg">3. Enviar Mensaje a una Profesora (vía WhatsApp)</h2>
               <form onSubmit={handleSendWhatsApp} className="grid md:grid-cols-4 gap-3">
                 <select
                   value={msgTeacherId}
@@ -1533,13 +1449,230 @@ export default function HomePage() {
         {/* ==================== VISTA AUTOMÁTICA: PROFESORA ==================== */}
         {currentUserProfile.role === 'teacher' && (
           <div className="space-y-6">
-            {/* SECTOR DE GRÁFICOS Y ANÁLISIS POR PERÍODO */}
+            {/* GRÁFICO TIPO GANTT: CARGA POR HORARIO Y PROFESORA */}
+            <section className="bg-white border rounded-xl p-5 shadow-sm space-y-4">
+              <div className="flex flex-wrap items-end justify-between gap-4">
+                <div>
+                  <h2 className="font-semibold text-lg">
+                    Diagrama de Carga Horaria por Profesora (Tipo Gantt)
+                  </h2>
+                  <p className="text-xs text-slate-600">
+                    Visualizá qué franjas están habilitadas, cuántos alumnos hay en cada hora y qué
+                    alumnos ocupan el cupo.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 text-sm">
+                  <label className="text-xs font-medium text-slate-600">Día a consultar:</label>
+                  <input
+                    type="date"
+                    value={ganttDate}
+                    onChange={(e) => setGanttDate(e.target.value)}
+                    className="border rounded-lg px-2.5 py-1.5 text-sm"
+                  />
+                  {ganttDayName && (
+                    <span className="text-xs font-semibold px-2.5 py-1 rounded bg-slate-100 text-slate-700">
+                      {ganttDayName}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-3 text-xs">
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-emerald-50 border border-emerald-200 text-emerald-900">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-emerald-500 inline-block" />
+                  Habilitada con alumnos
+                </span>
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-sky-50 border border-sky-200 text-sky-900">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-sky-400 inline-block" />
+                  Habilitada libre (0 alumnos)
+                </span>
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-rose-50 border border-rose-200 text-rose-900">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-rose-500 inline-block" />
+                  Cupo completo / Excepción
+                </span>
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-100 border border-slate-200 text-slate-600">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-slate-300 inline-block" />
+                  Sin franja habilitada
+                </span>
+              </div>
+
+              <div className="overflow-x-auto border rounded-xl">
+                <table className="min-w-[980px] w-full text-xs border-collapse">
+                  <thead>
+                    <tr className="bg-slate-100 text-slate-700 border-b">
+                      <th className="p-2.5 text-left font-semibold sticky left-0 bg-slate-100 z-10 min-w-[180px] border-r">
+                        Profesora
+                      </th>
+                      {GANTT_HOURS.map((h) => (
+                        <th
+                          key={h}
+                          className="p-2 text-center font-semibold border-r last:border-r-0 min-w-[74px]"
+                        >
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ganttRows.map((row) => (
+                      <tr key={row.teacher.id} className="border-b last:border-b-0">
+                        <td className="p-2.5 font-semibold sticky left-0 bg-white z-10 border-r align-top">
+                          <div>{row.teacher.full_name}</div>
+                          <div className="text-[11px] font-normal text-slate-500 mt-0.5">
+                            Cupo máx: {row.cap} • Bloques ocupados: {row.totalBlockAssignments}
+                          </div>
+                        </td>
+                        {row.cells.map((cell) => {
+                          const isFull = cell.count >= cell.cap || cell.hasOverride;
+                          let cellClasses = 'bg-slate-50 text-slate-400';
+                          if (isFull && cell.count > 0) {
+                            cellClasses = 'bg-rose-100 border-rose-300 text-rose-950';
+                          } else if (cell.count > 0) {
+                            cellClasses = 'bg-emerald-100 border-emerald-300 text-emerald-950';
+                          } else if (cell.isEnabled) {
+                            cellClasses = 'bg-sky-50 border-sky-200 text-sky-900';
+                          }
+
+                          return (
+                            <td
+                              key={cell.hourStart}
+                              title={`${row.teacher.full_name} (${cell.hourStart}-${cell.hourEnd}): ${
+                                cell.count
+                              }/${cell.cap} alumnos${
+                                cell.studentNames.length > 0
+                                  ? ' — ' + cell.studentNames.join(', ')
+                                  : ''
+                              }`}
+                              className="p-1 border-r last:border-r-0 align-top"
+                            >
+                              <div
+                                className={`rounded-md border p-1.5 min-h-[54px] flex flex-col justify-between ${cellClasses}`}
+                              >
+                                <div className="flex items-center justify-between font-bold text-[11px]">
+                                  <span>
+                                    {cell.count}/{cell.cap}
+                                  </span>
+                                  {cell.hasOverride && <span>!</span>}
+                                </div>
+                                {cell.studentNames.length > 0 ? (
+                                  <div className="text-[10px] leading-tight mt-1 line-clamp-2">
+                                    {cell.studentNames.join(', ')}
+                                  </div>
+                                ) : (
+                                  <div className="text-[10px] opacity-75 mt-1">
+                                    {cell.isEnabled ? 'Libre' : '—'}
+                                  </div>
+                                )}
+                              </div>
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            {/* CARGAR / MODIFICAR HORAS DE ALUMNOS (CUANDO ABONAN O POR INCONVENIENTES) */}
+            <section className="bg-white border rounded-xl p-5 shadow-sm space-y-4">
+              <div>
+                <h2 className="font-semibold text-lg">
+                  Cargar o Modificar Horas de Alumnos (Pagos / Ajustes)
+                </h2>
+                <p className="text-xs text-slate-600">
+                  Sumá horas al perfil del alumno cuando te abone (en efectivo o transferencia) o
+                  ajustá saldo ante algún inconveniente.
+                </p>
+              </div>
+
+              <form
+                onSubmit={handleAdjustStudentHours}
+                className="grid sm:grid-cols-2 md:grid-cols-4 gap-3 items-end"
+              >
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Alumno</label>
+                  <select
+                    value={adjustStudentId}
+                    onChange={(e) => setAdjustStudentId(e.target.value)}
+                    className="w-full border rounded-lg px-3 py-2 text-sm"
+                  >
+                    {students.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.full_name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">
+                    Horas a cargar (+) o descontar (-)
+                  </label>
+                  <input
+                    type="number"
+                    step="0.5"
+                    value={adjustHoursDelta}
+                    onChange={(e) => setAdjustHoursDelta(Number(e.target.value))}
+                    className="w-full border rounded-lg px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">
+                    Detalle / Motivo
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Ej: Pago combo 4hs en efectivo"
+                    value={adjustReason}
+                    onChange={(e) => setAdjustReason(e.target.value)}
+                    className="w-full border rounded-lg px-3 py-2 text-sm"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium"
+                >
+                  Actualizar Saldo de Horas
+                </button>
+              </form>
+
+              <div className="pt-2 border-t">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">
+                  Saldo Actual por Alumno
+                </h3>
+                <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-2 text-sm">
+                  {students.map((st) => {
+                    const stHours = combos
+                      .filter((c) => c.student_id === st.id)
+                      .reduce((sum, c) => sum + Number(c.remaining_hours), 0);
+                    return (
+                      <div
+                        key={st.id}
+                        className="border rounded-lg px-3 py-2 flex justify-between items-center bg-slate-50/60"
+                      >
+                        <span className="truncate pr-2">
+                          {st.full_name}{' '}
+                          {!st.is_registered && (
+                            <em className="text-xs text-amber-700">(urgencia)</em>
+                          )}
+                        </span>
+                        <span className="font-semibold text-blue-700 shrink-0">
+                          {stHours}h disp.
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </section>
+
+            {/* SECTOR DE ESTADÍSTICAS DE TURNOS POR PERÍODO */}
             <section className="bg-white border rounded-xl p-5 shadow-sm space-y-5">
               <div className="flex flex-wrap items-end justify-between gap-4">
                 <div>
-                  <h2 className="font-semibold text-lg">Gráficos y Análisis por Período</h2>
+                  <h2 className="font-semibold text-lg">Resumen de Clases por Período</h2>
                   <p className="text-xs text-slate-600">
-                    Facturación, medios de pago, materias concurridas y carga por profesora
+                    Cantidad de turnos, horas reservadas, materias y carga por profesora
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2 text-sm">
@@ -1560,72 +1693,24 @@ export default function HomePage() {
                 </div>
               </div>
 
-              <div className="grid sm:grid-cols-3 gap-4">
-                <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200">
-                  <div className="text-xs text-emerald-800 font-medium">Facturación en Período</div>
-                  <div className="text-2xl font-bold text-emerald-950 mt-1">
-                    ${filteredStats.totalRevenue.toLocaleString('es-AR')}
-                  </div>
-                </div>
+              <div className="grid sm:grid-cols-2 gap-4">
                 <div className="p-4 rounded-xl bg-blue-50 border border-blue-200">
-                  <div className="text-xs text-blue-800 font-medium">Turnos en Período</div>
+                  <div className="text-xs text-blue-800 font-medium">Turnos Activos en Período</div>
                   <div className="text-2xl font-bold text-blue-950 mt-1">
                     {filteredStats.totalTurns}
                   </div>
                 </div>
-                <div className="p-4 rounded-xl bg-slate-100 border border-slate-200">
-                  <div className="text-xs text-slate-700 font-medium">Medio Más Usado (Cobros)</div>
-                  <div className="text-lg font-bold text-slate-900 mt-1">
-                    {filteredStats.walletCount >= filteredStats.cashCount
-                      ? `Billetera Virtual (${filteredStats.walletCount})`
-                      : `Efectivo (${filteredStats.cashCount})`}
+                <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200">
+                  <div className="text-xs text-emerald-800 font-medium">
+                    Horas Totales Agendadas
+                  </div>
+                  <div className="text-2xl font-bold text-emerald-950 mt-1">
+                    {formatHoursDecimal(filteredStats.totalHoursBooked)}
                   </div>
                 </div>
               </div>
 
-              <div className="grid md:grid-cols-3 gap-6 text-sm">
-                <div className="border rounded-xl p-4 space-y-3">
-                  <h3 className="font-semibold">Medios de Pago (Monto Cobrado)</h3>
-                  <div className="space-y-2">
-                    <div>
-                      <div className="flex justify-between text-xs mb-1">
-                        <span>Billetera Virtual ({filteredStats.walletCount})</span>
-                        <strong>${filteredStats.walletTotal.toLocaleString('es-AR')}</strong>
-                      </div>
-                      <div className="w-full bg-slate-100 rounded-full h-3 overflow-hidden">
-                        <div
-                          className="bg-blue-600 h-3"
-                          style={{
-                            width: `${
-                              filteredStats.totalRevenue > 0
-                                ? Math.round((filteredStats.walletTotal / filteredStats.totalRevenue) * 100)
-                                : 0
-                            }%`,
-                          }}
-                        />
-                      </div>
-                    </div>
-                    <div>
-                      <div className="flex justify-between text-xs mb-1">
-                        <span>Efectivo ({filteredStats.cashCount})</span>
-                        <strong>${filteredStats.cashTotal.toLocaleString('es-AR')}</strong>
-                      </div>
-                      <div className="w-full bg-slate-100 rounded-full h-3 overflow-hidden">
-                        <div
-                          className="bg-emerald-600 h-3"
-                          style={{
-                            width: `${
-                              filteredStats.totalRevenue > 0
-                                ? Math.round((filteredStats.cashTotal / filteredStats.totalRevenue) * 100)
-                                : 0
-                            }%`,
-                          }}
-                        />
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
+              <div className="grid md:grid-cols-2 gap-6 text-sm">
                 <div className="border rounded-xl p-4 space-y-3">
                   <h3 className="font-semibold">Materias Más Concurridas</h3>
                   <div className="space-y-2">
@@ -1668,65 +1753,15 @@ export default function HomePage() {
               </div>
             </section>
 
-            {/* Modificar horas de usuarios por inconvenientes */}
-            <section className="bg-white border rounded-xl p-5 shadow-sm space-y-3">
-              <h2 className="font-semibold text-lg">
-                Modificar Horas de Alumnos (por inconvenientes o reprogramaciones)
-              </h2>
-              <form onSubmit={handleAdjustStudentHours} className="grid sm:grid-cols-2 md:grid-cols-4 gap-3 items-end">
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">Alumno</label>
-                  <select
-                    value={adjustStudentId}
-                    onChange={(e) => setAdjustStudentId(e.target.value)}
-                    className="w-full border rounded-lg px-3 py-2 text-sm"
-                  >
-                    {students.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.full_name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">
-                    Horas a sumar (+) o restar (-)
-                  </label>
-                  <input
-                    type="number"
-                    step="0.5"
-                    value={adjustHoursDelta}
-                    onChange={(e) => setAdjustHoursDelta(Number(e.target.value))}
-                    className="w-full border rounded-lg px-3 py-2 text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">
-                    Motivo del ajuste
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="Ej: Corte de luz / clase suspendida"
-                    value={adjustReason}
-                    onChange={(e) => setAdjustReason(e.target.value)}
-                    className="w-full border rounded-lg px-3 py-2 text-sm"
-                  />
-                </div>
-                <button
-                  type="submit"
-                  className="px-4 py-2 rounded-lg bg-slate-900 text-white text-sm font-medium"
-                >
-                  Aplicar Ajuste de Horas
-                </button>
-              </form>
-            </section>
-
             {/* Carga de urgencia + excepción de cupo */}
             <section className="bg-white border rounded-xl p-5 shadow-sm space-y-3">
               <h2 className="font-semibold text-lg">
                 Cargar Alumno de Urgencia / Forzar Excepción de Cupo
               </h2>
-              <form onSubmit={handleUrgentBooking} className="grid sm:grid-cols-2 md:grid-cols-6 gap-3 items-end">
+              <form
+                onSubmit={handleUrgentBooking}
+                className="grid sm:grid-cols-2 md:grid-cols-6 gap-3 items-end"
+              >
                 <input
                   type="text"
                   placeholder="Nombre del alumno"
@@ -1805,7 +1840,10 @@ export default function HomePage() {
                   {upcomingBookings.map((b) => {
                     const isMyTurn = b.teacher_id === currentUserProfile.id;
                     return (
-                      <div key={b.id} className="border rounded-lg p-3 flex justify-between items-center gap-2">
+                      <div
+                        key={b.id}
+                        className="border rounded-lg p-3 flex justify-between items-center gap-2"
+                      >
                         <div>
                           <div className="font-semibold">
                             {b.booking_date} • {b.start_time.slice(0, 5)}hs — {b.profiles?.full_name}
@@ -1870,7 +1908,10 @@ export default function HomePage() {
                   {pastBookings.map((b) => {
                     const isMyTurn = b.teacher_id === currentUserProfile.id;
                     return (
-                      <div key={b.id} className="border rounded-lg p-3 flex justify-between items-center gap-2">
+                      <div
+                        key={b.id}
+                        className="border rounded-lg p-3 flex justify-between items-center gap-2"
+                      >
                         <div>
                           <div className="font-semibold">
                             {b.booking_date} • {b.profiles?.full_name}
@@ -1916,58 +1957,6 @@ export default function HomePage() {
                   {pastBookings.length === 0 && (
                     <p className="text-slate-500 text-xs">Aún no hay turnos pasados registrados.</p>
                   )}
-                </div>
-              </div>
-            </section>
-
-            {/* Estado de alumnos, combos y pagos */}
-            <section className="bg-white border rounded-xl p-5 shadow-sm grid md:grid-cols-2 gap-6">
-              <div>
-                <h2 className="font-semibold text-base mb-3">Estado de Alumnos y Combos</h2>
-                <div className="space-y-2 max-h-64 overflow-y-auto text-sm">
-                  {students.map((st) => {
-                    const stHours = combos
-                      .filter((c) => c.student_id === st.id)
-                      .reduce((sum, c) => sum + Number(c.remaining_hours), 0);
-                    return (
-                      <div key={st.id} className="border-b pb-2 flex justify-between">
-                        <span>
-                          {st.full_name}{' '}
-                          {!st.is_registered && (
-                            <em className="text-xs text-amber-700">(sin usuario)</em>
-                          )}
-                        </span>
-                        <span className="font-semibold text-blue-700">Combo: {stHours}h disp.</span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div>
-                <h2 className="font-semibold text-base mb-3">Pagos (Billetera Virtual y Efectivo)</h2>
-                <div className="space-y-2 max-h-64 overflow-y-auto text-sm">
-                  {payments.map((p) => (
-                    <div key={p.id} className="border rounded-lg p-2.5 flex justify-between items-center">
-                      <div>
-                        <div className="font-medium">
-                          {p.profiles?.full_name} — ${p.amount}
-                        </div>
-                        <div className="text-xs text-slate-600">
-                          {p.method === 'cash' ? 'Efectivo' : 'Billetera Virtual'} •{' '}
-                          {p.status === 'paid' ? 'PAGADO' : 'PENDIENTE'}
-                        </div>
-                      </div>
-                      {p.status === 'pending' && p.method === 'cash' && (
-                        <button
-                          onClick={() => handleConfirmCashPayment(p)}
-                          className="px-3 py-1 rounded bg-emerald-600 text-white text-xs font-medium"
-                        >
-                          Registrar Cobro Efectivo
-                        </button>
-                      )}
-                    </div>
-                  ))}
                 </div>
               </div>
             </section>
@@ -2107,39 +2096,6 @@ export default function HomePage() {
                     Todavía no cargaste días y horarios habilitados.
                   </p>
                 )}
-              </div>
-            </section>
-
-            {/* Modificar precios de horas y combos */}
-            <section className="bg-white border rounded-xl p-5 shadow-sm space-y-3">
-              <h2 className="font-semibold text-base">Modificar Precios de Horas y Combos</h2>
-              <div className="grid sm:grid-cols-3 gap-4">
-                {pricing.map((item) => (
-                  <div key={item.id} className="border rounded-lg p-4 space-y-2">
-                    <div className="font-bold">{item.name}</div>
-                    <div className="text-xs text-slate-500">{item.hours_included} hora(s)</div>
-                    <div className="flex gap-2">
-                      <input
-                        type="number"
-                        defaultValue={item.price}
-                        id={`price-${item.id}`}
-                        className="w-full border rounded px-2 py-1 text-sm"
-                      />
-                      <button
-                        onClick={() => {
-                          const input = document.getElementById(
-                            `price-${item.id}`
-                          ) as HTMLInputElement;
-                          const val = Number(input?.value);
-                          if (!Number.isNaN(val) && val > 0) handleUpdatePrice(item.id, val);
-                        }}
-                        className="px-3 py-1 rounded bg-emerald-600 text-white text-sm"
-                      >
-                        Guardar
-                      </button>
-                    </div>
-                  </div>
-                ))}
               </div>
             </section>
           </div>
