@@ -25,6 +25,14 @@ type AvailabilitySlot = {
   is_active: boolean;
 };
 
+type PricingItem = {
+  id: string;
+  kind: 'hourly' | 'combo';
+  name: string;
+  hours_included: number;
+  price: number;
+};
+
 type StudentCombo = {
   id: string;
   student_id: string;
@@ -148,6 +156,7 @@ export default function HomePage() {
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [teacherSubjects, setTeacherSubjects] = useState<TeacherSubject[]>([]);
   const [slots, setSlots] = useState<AvailabilitySlot[]>([]);
+  const [pricing, setPricing] = useState<PricingItem[]>([]);
   const [combos, setCombos] = useState<StudentCombo[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [banner, setBanner] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
@@ -160,7 +169,6 @@ export default function HomePage() {
   const [bookDate, setBookDate] = useState('');
   const [bookStartTime, setBookStartTime] = useState('15:00');
   const [bookEndTime, setBookEndTime] = useState('19:00');
-  const [bookModality, setBookModality] = useState<'hourly' | 'combo'>('combo');
   const [lastReceipt, setLastReceipt] = useState<Booking | null>(null);
 
   // Mensaje WhatsApp
@@ -260,6 +268,7 @@ export default function HomePage() {
       { data: subjs },
       { data: tSubjs },
       { data: avSlots },
+      { data: prices },
       { data: stCombos },
       { data: bks },
     ] = await Promise.all([
@@ -267,6 +276,7 @@ export default function HomePage() {
       supabase.from('subjects').select('*').order('name'),
       supabase.from('teacher_subjects').select('*'),
       supabase.from('availability_slots').select('*').order('day_of_week').order('start_time'),
+      supabase.from('pricing_catalog').select('*').eq('is_active', true).order('hours_included'),
       supabase
         .from('student_combos')
         .select('*, pricing_catalog(name)')
@@ -295,6 +305,7 @@ export default function HomePage() {
     }
     if (tSubjs) setTeacherSubjects(tSubjs as TeacherSubject[]);
     if (avSlots) setSlots(avSlots as AvailabilitySlot[]);
+    if (prices) setPricing(prices as PricingItem[]);
     if (stCombos) setCombos(stCombos as unknown as StudentCombo[]);
     if (bks) setBookings(bks as unknown as Booking[]);
   }
@@ -593,6 +604,17 @@ export default function HomePage() {
     loadAll();
   }
 
+  async function handleUpdatePrice(id: string, newPrice: number) {
+    const { error } = await supabase
+      .from('pricing_catalog')
+      .update({ price: newPrice, updated_at: new Date().toISOString() })
+      .eq('id', id);
+    if (!error) {
+      setBanner({ type: 'ok', text: 'Precio actualizado.' });
+      loadAll();
+    }
+  }
+
   async function handleBookTurn(e: React.FormEvent) {
     e.preventDefault();
     if (!currentUserProfile || !bookTeacherId || !bookSubjectId || !bookDate) {
@@ -604,6 +626,14 @@ export default function HomePage() {
       setBanner({
         type: 'err',
         text: 'La hora de salida debe ser posterior a la hora de entrada.',
+      });
+      return;
+    }
+
+    if (totalComboHours < requestedDurationHours) {
+      setBanner({
+        type: 'err',
+        text: `Necesitás ${formatHoursDecimal(requestedDurationHours)} disponibles y tenés ${totalComboHours}h. Avisale a tu profesora cuando abones para que cargue tus horas.`,
       });
       return;
     }
@@ -646,31 +676,21 @@ export default function HomePage() {
     }
 
     let usedComboId: string | null = null;
-    if (bookModality === 'combo') {
-      if (totalComboHours < requestedDurationHours) {
-        setBanner({
-          type: 'err',
-          text: `Necesitás ${formatHoursDecimal(requestedDurationHours)} disponibles y tenés ${totalComboHours}h. Avisale a tu profesora cuando abones para que cargue tus horas.`,
-        });
-        return;
-      }
+    let remainingToDeduct = requestedDurationHours;
+    const orderedCombos = [...myCombos].sort(
+      (a, b) => Number(b.remaining_hours) - Number(a.remaining_hours)
+    );
 
-      let remainingToDeduct = requestedDurationHours;
-      const orderedCombos = [...myCombos].sort(
-        (a, b) => Number(b.remaining_hours) - Number(a.remaining_hours)
-      );
-
-      for (const c of orderedCombos) {
-        if (remainingToDeduct <= 0) break;
-        const currentRem = Number(c.remaining_hours);
-        const deductHere = Math.min(currentRem, remainingToDeduct);
-        if (!usedComboId) usedComboId = c.id;
-        await supabase
-          .from('student_combos')
-          .update({ remaining_hours: Math.max(0, currentRem - deductHere) })
-          .eq('id', c.id);
-        remainingToDeduct = Math.round((remainingToDeduct - deductHere) * 100) / 100;
-      }
+    for (const c of orderedCombos) {
+      if (remainingToDeduct <= 0) break;
+      const currentRem = Number(c.remaining_hours);
+      const deductHere = Math.min(currentRem, remainingToDeduct);
+      if (!usedComboId) usedComboId = c.id;
+      await supabase
+        .from('student_combos')
+        .update({ remaining_hours: Math.max(0, currentRem - deductHere) })
+        .eq('id', c.id);
+      remainingToDeduct = Math.round((remainingToDeduct - deductHere) * 100) / 100;
     }
 
     const receiptCode = 'CMP-' + Math.floor(100000 + Math.random() * 900000);
@@ -686,7 +706,7 @@ export default function HomePage() {
         start_time: bookStartTime + ':00',
         end_time: bookEndTime + ':00',
         duration_hours: requestedDurationHours,
-        modality: bookModality,
+        modality: 'combo',
         student_combo_id: usedComboId,
         status: 'confirmed',
         is_override: false,
@@ -702,7 +722,7 @@ export default function HomePage() {
       setManualTeacherOverride(false);
       setBanner({
         type: 'ok',
-        text: `Turno reservado (${bookStartTime} a ${bookEndTime}, ${formatHoursDecimal(requestedDurationHours)}). Comprobante: ${receiptCode}`,
+        text: `Turno reservado (${bookStartTime} a ${bookEndTime}). Se descontaron ${formatHoursDecimal(requestedDurationHours)} de tu saldo. Comprobante: ${receiptCode}`,
       });
       loadAll();
     }
@@ -734,7 +754,7 @@ export default function HomePage() {
 
     const hoursToRefund = Number(booking.duration_hours || 1);
 
-    if (booking.modality === 'combo' && hoursToRefund > 0) {
+    if (hoursToRefund > 0) {
       const targetCombo =
         combos.find((c) => c.id === booking.student_combo_id) ||
         combos.find((c) => c.student_id === booking.student_id);
@@ -757,10 +777,7 @@ export default function HomePage() {
 
     setBanner({
       type: 'ok',
-      text:
-        booking.modality === 'combo'
-          ? `Turno ${booking.receipt_code} cancelado a tiempo. Se devolvieron ${formatHoursDecimal(hoursToRefund)} a tu saldo.`
-          : `Turno ${booking.receipt_code} cancelado a tiempo. El cupo quedó liberado.`,
+      text: `Turno ${booking.receipt_code} cancelado a tiempo. Se devolvieron ${formatHoursDecimal(hoursToRefund)} a tu saldo.`,
     });
     loadAll();
   }
@@ -1177,11 +1194,53 @@ export default function HomePage() {
               </div>
             </section>
 
+            {/* PRECIOS DE HORAS SUELTAS Y COMBOS */}
+            <section className="bg-white border rounded-xl p-5 shadow-sm space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 className="font-semibold text-base">
+                  Precios de Horas Sueltas y Combos
+                </h2>
+                <span className="text-xs text-slate-500">
+                  Consultá los valores de referencia y pedile a tu profesora que acredite tus horas al abonar.
+                </span>
+              </div>
+              <div className="grid sm:grid-cols-2 md:grid-cols-4 gap-3">
+                {pricing.map((item) => (
+                  <div
+                    key={item.id}
+                    className="border rounded-xl p-3.5 bg-slate-50/70 flex flex-col justify-between gap-2"
+                  >
+                    <div>
+                      <span
+                        className={`inline-block text-[11px] font-semibold px-2 py-0.5 rounded mb-1 ${
+                          item.kind === 'combo'
+                            ? 'bg-indigo-100 text-indigo-800'
+                            : 'bg-sky-100 text-sky-800'
+                        }`}
+                      >
+                        {item.kind === 'combo' ? 'Combo' : 'Hora suelta'}
+                      </span>
+                      <div className="font-semibold text-sm text-slate-900">{item.name}</div>
+                      <div className="text-xs text-slate-600">{item.hours_included} hora(s)</div>
+                    </div>
+                    <div className="text-lg font-bold text-emerald-700">
+                      ${Number(item.price).toLocaleString('es-AR')}
+                    </div>
+                  </div>
+                ))}
+                {pricing.length === 0 && (
+                  <p className="text-xs text-slate-500 col-span-full">
+                    No hay precios publicados en este momento.
+                  </p>
+                )}
+              </div>
+            </section>
+
             <section className="bg-white border rounded-xl p-5 shadow-sm space-y-4">
               <h2 className="font-semibold text-lg">1. Agendar Turno en la Agenda</h2>
               <form
                 onSubmit={handleBookTurn}
-                className="grid sm:grid-cols-2 md:grid-cols-6 gap-3 items-end"
+                className="grid sm:grid-cols-2 md:grid-cols-5 gap-3 items-end"
               >
                 <div>
                   <label className="block text-xs font-medium text-slate-600 mb-1">Materia</label>
@@ -1266,24 +1325,10 @@ export default function HomePage() {
                   />
                 </div>
 
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">
-                    Uso de horas
-                  </label>
-                  <select
-                    value={bookModality}
-                    onChange={(e) => setBookModality(e.target.value as 'hourly' | 'combo')}
-                    className="w-full border rounded-lg px-3 py-2 text-sm"
-                  >
-                    <option value="combo">Descontar de mis horas ({totalComboHours}h disp.)</option>
-                    <option value="hourly">Registrar sin descontar saldo</option>
-                  </select>
-                </div>
-
-                <div className="sm:col-span-2 md:col-span-6 flex flex-wrap items-center justify-between gap-3 pt-2">
+                <div className="sm:col-span-2 md:col-span-5 flex flex-wrap items-center justify-between gap-3 pt-2">
                   <div className="text-xs text-slate-600 space-y-1 sm:space-y-0">
                     <span className="inline-block mr-3 px-2.5 py-0.5 rounded bg-slate-100 text-slate-800 font-medium border">
-                      Duración:{' '}
+                      A descontar de tu saldo:{' '}
                       <strong>
                         {requestedDurationHours > 0
                           ? formatHoursDecimal(requestedDurationHours)
@@ -1345,13 +1390,7 @@ export default function HomePage() {
                         Number(lastReceipt.duration_hours || 1)
                       )
                     ).slice(0, 5)}{' '}
-                    hs ({formatHoursDecimal(Number(lastReceipt.duration_hours || 1))})
-                  </p>
-                  <p>
-                    <strong>Modalidad:</strong>{' '}
-                    {lastReceipt.modality === 'combo'
-                      ? 'Descuento de saldo de horas'
-                      : 'Sin descuento de saldo'}
+                    hs ({formatHoursDecimal(Number(lastReceipt.duration_hours || 1))} descontadas)
                   </p>
                 </div>
               )}
@@ -1402,8 +1441,7 @@ export default function HomePage() {
                           )}
                         </div>
                         <div className="text-xs text-slate-600">
-                          Profesora: {b.teacher?.full_name} • Comprobante: {b.receipt_code} •{' '}
-                          {b.modality === 'combo' ? 'Saldo de horas' : 'Sin descuento'}
+                          Profesora: {b.teacher?.full_name} • Comprobante: {b.receipt_code}
                         </div>
                         {!isCancelled && hoursUntilStart > 0 && hoursUntilStart < 2 && (
                           <div className="text-xs text-amber-800 font-medium">
@@ -2115,6 +2153,45 @@ export default function HomePage() {
                     Todavía no cargaste días y horarios habilitados.
                   </p>
                 )}
+              </div>
+            </section>
+
+            {/* Precios de horas sueltas y combos */}
+            <section className="bg-white border rounded-xl p-5 shadow-sm space-y-3">
+              <h2 className="font-semibold text-base">Precios de Horas Sueltas y Combos</h2>
+              <div className="grid sm:grid-cols-3 gap-4">
+                {pricing.map((item) => (
+                  <div key={item.id} className="border rounded-lg p-4 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="font-bold">{item.name}</div>
+                      <span className="text-[11px] px-2 py-0.5 rounded bg-slate-100 text-slate-600">
+                        {item.kind === 'combo' ? 'Combo' : 'Hora suelta'}
+                      </span>
+                    </div>
+                    <div className="text-xs text-slate-500">{item.hours_included} hora(s)</div>
+                    <div className="flex gap-2">
+                      <input
+                        type="number"
+                        defaultValue={item.price}
+                        id={`price-${item.id}`}
+                        className="w-full border rounded px-2 py-1 text-sm"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const input = document.getElementById(
+                            `price-${item.id}`
+                          ) as HTMLInputElement;
+                          const val = Number(input?.value);
+                          if (!Number.isNaN(val) && val > 0) handleUpdatePrice(item.id, val);
+                        }}
+                        className="px-3 py-1 rounded bg-emerald-600 text-white text-sm"
+                      >
+                        Guardar
+                      </button>
+                    </div>
+                  </div>
+                ))}
               </div>
             </section>
           </div>
