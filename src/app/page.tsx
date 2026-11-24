@@ -9,6 +9,7 @@ type Profile = {
   full_name: string;
   email: string | null;
   phone: string | null;
+  parent_phone?: string | null;
   role: 'student' | 'teacher';
   max_capacity: number;
   is_registered: boolean;
@@ -57,7 +58,7 @@ type Booking = {
   is_override: boolean;
   is_urgent_walkin: boolean;
   attended: boolean | null;
-  profiles?: { full_name: string } | null;
+  profiles?: { full_name: string; phone?: string | null; parent_phone?: string | null } | null;
   teacher?: { full_name: string } | null;
   subjects?: { name: string } | null;
 };
@@ -148,6 +149,7 @@ export default function HomePage() {
   const [authPassword, setAuthPassword] = useState('');
   const [authFullName, setAuthFullName] = useState('');
   const [authPhone, setAuthPhone] = useState('');
+  const [authParentPhone, setAuthParentPhone] = useState('');
   const [authSubmitting, setAuthSubmitting] = useState(false);
 
   // Datos de la app
@@ -178,6 +180,7 @@ export default function HomePage() {
   // Profesora: urgencia & excepción
   const [urgentName, setUrgentName] = useState('');
   const [urgentPhone, setUrgentPhone] = useState('');
+  const [urgentParentPhone, setUrgentParentPhone] = useState('');
   const [urgentSubjectId, setUrgentSubjectId] = useState('');
   const [urgentTeacherId, setUrgentTeacherId] = useState('');
   const [urgentDate, setUrgentDate] = useState('');
@@ -283,7 +286,9 @@ export default function HomePage() {
         .order('created_at', { ascending: false }),
       supabase
         .from('bookings')
-        .select('*, profiles:student_id(full_name), teacher:teacher_id(full_name), subjects(name)')
+        .select(
+          '*, profiles:student_id(full_name, phone, parent_phone), teacher:teacher_id(full_name), subjects(name)'
+        )
         .order('booking_date', { ascending: false })
         .order('start_time', { ascending: true }),
     ]);
@@ -343,6 +348,7 @@ export default function HomePage() {
           data: {
             full_name: authFullName.trim(),
             phone: authPhone.trim() || null,
+            parent_phone: authParentPhone.trim() || null,
             role: 'student',
           },
         },
@@ -350,6 +356,12 @@ export default function HomePage() {
       if (error) {
         setBanner({ type: 'err', text: error.message });
       } else if (data.user) {
+        if (authParentPhone.trim()) {
+          await supabase
+            .from('profiles')
+            .update({ parent_phone: authParentPhone.trim() })
+            .eq('auth_user_id', data.user.id);
+        }
         await fetchCurrentProfile(data.user.id);
         setBanner({ type: 'ok', text: '¡Cuenta creada! Bienvenido/a.' });
       }
@@ -553,6 +565,44 @@ export default function HomePage() {
     };
   }, [activeBookings, subjects, teachers, statsFrom, statsTo]);
 
+  function handleNotifyParents(booking: Booking) {
+    const studentObj = students.find((s) => s.id === booking.student_id);
+    const parentPhoneRaw =
+      booking.profiles?.parent_phone ||
+      studentObj?.parent_phone ||
+      booking.profiles?.phone ||
+      studentObj?.phone ||
+      '';
+    const cleanPhone = parentPhoneRaw.replace(/\D/g, '');
+
+    const studentName = booking.profiles?.full_name || studentObj?.full_name || 'el alumno';
+    const subjectName = booking.subjects?.name || 'la clase';
+    const attendanceText =
+      booking.attended === true
+        ? 'asistió a la clase'
+        : booking.attended === false
+        ? 'no asistió a la clase'
+        : 'tuvo clase registrada';
+
+    const defaultMsg = `Hola, les escribo de parte de ${
+      currentUserProfile?.full_name || 'la profesora'
+    } para contarles cómo fue la jornada de ${studentName} en ${subjectName} el ${
+      booking.booking_date
+    } (${booking.start_time.slice(0, 5)} hs): ${attendanceText}.`;
+
+    const customMsg = window.prompt(
+      `Mensaje para los padres de ${studentName}${
+        cleanPhone ? ` (WA: ${cleanPhone})` : ' (sin número cargado, se abrirá WhatsApp para elegir contacto)'
+      }:`,
+      defaultMsg
+    );
+
+    if (customMsg === null) return;
+    const encoded = encodeURIComponent(customMsg.trim() || defaultMsg);
+    const url = cleanPhone ? `https://wa.me/${cleanPhone}?text=${encoded}` : `https://wa.me/?text=${encoded}`;
+    window.open(url, '_blank');
+  }
+
   async function handleAdjustStudentHours(e: React.FormEvent) {
     e.preventDefault();
     if (!adjustStudentId || adjustHoursDelta === 0 || !adjustReason.trim()) {
@@ -712,7 +762,9 @@ export default function HomePage() {
         is_override: false,
         is_urgent_walkin: false,
       })
-      .select('*, profiles:student_id(full_name), teacher:teacher_id(full_name), subjects(name)')
+      .select(
+        '*, profiles:student_id(full_name, phone, parent_phone), teacher:teacher_id(full_name), subjects(name)'
+      )
       .single();
 
     if (error) {
@@ -808,6 +860,7 @@ export default function HomePage() {
       .insert({
         full_name: urgentName.trim() + ' (Urgencia)',
         phone: urgentPhone.trim() || null,
+        parent_phone: urgentParentPhone.trim() || null,
         role: 'student',
         is_registered: false,
       })
@@ -839,6 +892,7 @@ export default function HomePage() {
     } else {
       setUrgentName('');
       setUrgentPhone('');
+      setUrgentParentPhone('');
       setForceOverride(false);
       setBanner({
         type: 'ok',
@@ -1066,13 +1120,25 @@ export default function HomePage() {
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Teléfono / WhatsApp
+                    Teléfono / WhatsApp del alumno
                   </label>
                   <input
                     type="text"
                     placeholder="Ej: 5492657000000"
                     value={authPhone}
                     onChange={(e) => setAuthPhone(e.target.value)}
+                    className="w-full border rounded-lg px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    WhatsApp de madre / padre / tutor (opcional)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Ej: 5492657111111 (para avisos de clases)"
+                    value={authParentPhone}
+                    onChange={(e) => setAuthParentPhone(e.target.value)}
                     className="w-full border rounded-lg px-3 py-2 text-sm"
                   />
                 </div>
@@ -1181,6 +1247,9 @@ export default function HomePage() {
                 <p className="text-xs text-slate-500">
                   {currentUserProfile.email}{' '}
                   {currentUserProfile.phone ? `• Tel: ${currentUserProfile.phone}` : ''}
+                  {currentUserProfile.parent_phone
+                    ? ` • WA Padres: ${currentUserProfile.parent_phone}`
+                    : ''}
                 </p>
               </div>
               <div className="text-right space-y-1">
@@ -1191,48 +1260,6 @@ export default function HomePage() {
                 <p className="text-[11px] text-slate-500">
                   Cuando abones tus clases, tu profesora cargará las horas en tu perfil.
                 </p>
-              </div>
-            </section>
-
-            {/* PRECIOS DE HORAS SUELTAS Y COMBOS */}
-            <section className="bg-white border rounded-xl p-5 shadow-sm space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h2 className="font-semibold text-base">
-                  Precios de Horas Sueltas y Combos
-                </h2>
-                <span className="text-xs text-slate-500">
-                  Consultá los valores de referencia y pedile a tu profesora que acredite tus horas al abonar.
-                </span>
-              </div>
-              <div className="grid sm:grid-cols-2 md:grid-cols-4 gap-3">
-                {pricing.map((item) => (
-                  <div
-                    key={item.id}
-                    className="border rounded-xl p-3.5 bg-slate-50/70 flex flex-col justify-between gap-2"
-                  >
-                    <div>
-                      <span
-                        className={`inline-block text-[11px] font-semibold px-2 py-0.5 rounded mb-1 ${
-                          item.kind === 'combo'
-                            ? 'bg-indigo-100 text-indigo-800'
-                            : 'bg-sky-100 text-sky-800'
-                        }`}
-                      >
-                        {item.kind === 'combo' ? 'Combo' : 'Hora suelta'}
-                      </span>
-                      <div className="font-semibold text-sm text-slate-900">{item.name}</div>
-                      <div className="text-xs text-slate-600">{item.hours_included} hora(s)</div>
-                    </div>
-                    <div className="text-lg font-bold text-emerald-700">
-                      ${Number(item.price).toLocaleString('es-AR')}
-                    </div>
-                  </div>
-                ))}
-                {pricing.length === 0 && (
-                  <p className="text-xs text-slate-500 col-span-full">
-                    No hay precios publicados en este momento.
-                  </p>
-                )}
               </div>
             </section>
 
@@ -1505,6 +1532,46 @@ export default function HomePage() {
                 </button>
               </form>
             </section>
+
+            {/* ÚLTIMO CAMPO EN VISTA ALUMNO: PRECIOS DE HORAS SUELTAS Y COMBOS */}
+            <section className="bg-white border rounded-xl p-5 shadow-sm space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 className="font-semibold text-base">4. Precios de Horas Sueltas y Combos</h2>
+                <span className="text-xs text-slate-500">
+                  Valores de referencia. Al abonar, avisale a tu profesora para que cargue las horas.
+                </span>
+              </div>
+              <div className="grid sm:grid-cols-2 md:grid-cols-4 gap-3">
+                {pricing.map((item) => (
+                  <div
+                    key={item.id}
+                    className="border rounded-xl p-3.5 bg-slate-50/70 flex flex-col justify-between gap-2"
+                  >
+                    <div>
+                      <span
+                        className={`inline-block text-[11px] font-semibold px-2 py-0.5 rounded mb-1 ${
+                          item.kind === 'combo'
+                            ? 'bg-indigo-100 text-indigo-800'
+                            : 'bg-sky-100 text-sky-800'
+                        }`}
+                      >
+                        {item.kind === 'combo' ? 'Combo' : 'Hora suelta'}
+                      </span>
+                      <div className="font-semibold text-sm text-slate-900">{item.name}</div>
+                      <div className="text-xs text-slate-600">{item.hours_included} hora(s)</div>
+                    </div>
+                    <div className="text-lg font-bold text-emerald-700">
+                      ${Number(item.price).toLocaleString('es-AR')}
+                    </div>
+                  </div>
+                ))}
+                {pricing.length === 0 && (
+                  <p className="text-xs text-slate-500 col-span-full">
+                    No hay precios publicados en este momento.
+                  </p>
+                )}
+              </div>
+            </section>
           </div>
         )}
 
@@ -1701,7 +1768,7 @@ export default function HomePage() {
 
               <div className="pt-2 border-t">
                 <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">
-                  Saldo Actual por Alumno
+                  Saldo Actual y Contacto de Padres por Alumno
                 </h3>
                 <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-2 text-sm">
                   {students.map((st) => {
@@ -1711,14 +1778,21 @@ export default function HomePage() {
                     return (
                       <div
                         key={st.id}
-                        className="border rounded-lg px-3 py-2 flex justify-between items-center bg-slate-50/60"
+                        className="border rounded-lg px-3 py-2 flex justify-between items-center bg-slate-50/60 gap-2"
                       >
-                        <span className="truncate pr-2">
-                          {st.full_name}{' '}
-                          {!st.is_registered && (
-                            <em className="text-xs text-amber-700">(urgencia)</em>
+                        <div className="min-w-0">
+                          <div className="truncate font-medium">
+                            {st.full_name}{' '}
+                            {!st.is_registered && (
+                              <em className="text-xs text-amber-700">(urgencia)</em>
+                            )}
+                          </div>
+                          {st.parent_phone && (
+                            <div className="text-[11px] text-slate-500 truncate">
+                              WA Padres: {st.parent_phone}
+                            </div>
                           )}
-                        </span>
+                        </div>
                         <span className="font-semibold text-blue-700 shrink-0">
                           {stHours}h disp.
                         </span>
@@ -1816,7 +1890,7 @@ export default function HomePage() {
               </h2>
               <form
                 onSubmit={handleUrgentBooking}
-                className="grid sm:grid-cols-2 md:grid-cols-6 gap-3 items-end"
+                className="grid sm:grid-cols-2 md:grid-cols-7 gap-3 items-end"
               >
                 <input
                   type="text"
@@ -1827,9 +1901,16 @@ export default function HomePage() {
                 />
                 <input
                   type="text"
-                  placeholder="Teléfono (opcional)"
+                  placeholder="Tel. alumno (opc.)"
                   value={urgentPhone}
                   onChange={(e) => setUrgentPhone(e.target.value)}
+                  className="border rounded-lg px-3 py-2 text-sm"
+                />
+                <input
+                  type="text"
+                  placeholder="WA padres (opc.)"
+                  value={urgentParentPhone}
+                  onChange={(e) => setUrgentParentPhone(e.target.value)}
                   className="border rounded-lg px-3 py-2 text-sm"
                 />
                 <select
@@ -1867,7 +1948,7 @@ export default function HomePage() {
                   onChange={(e) => setUrgentTime(e.target.value)}
                   className="border rounded-lg px-3 py-2 text-sm"
                 />
-                <div className="sm:col-span-2 md:col-span-6 flex flex-wrap items-center justify-between gap-3 pt-1">
+                <div className="sm:col-span-2 md:col-span-7 flex flex-wrap items-center justify-between gap-3 pt-1">
                   <label className="flex items-center gap-2 text-sm font-medium text-amber-800">
                     <input
                       type="checkbox"
@@ -1912,7 +1993,7 @@ export default function HomePage() {
                           </div>
                         </div>
                         <div className="flex flex-col items-end gap-1">
-                          <div className="flex gap-1">
+                          <div className="flex flex-wrap justify-end gap-1">
                             <button
                               type="button"
                               disabled={!isMyTurn}
@@ -1941,10 +2022,17 @@ export default function HomePage() {
                             >
                               Faltó
                             </button>
+                            <button
+                              type="button"
+                              onClick={() => handleNotifyParents(b)}
+                              className="px-2 py-1 rounded text-xs font-medium bg-green-50 text-green-800 border border-green-300 hover:bg-green-100"
+                            >
+                              Avisar a padres
+                            </button>
                           </div>
                           {!isMyTurn && (
                             <span className="text-[11px] text-slate-400">
-                              Solo {b.teacher?.full_name}
+                              Asistencia: solo {b.teacher?.full_name}
                             </span>
                           )}
                         </div>
@@ -1985,28 +2073,37 @@ export default function HomePage() {
                               ? 'Faltó'
                               : 'Sin marcar'}
                           </span>
-                          {isMyTurn && (
-                            <div className="flex gap-1">
-                              <button
-                                type="button"
-                                onClick={() => handleMarkAttendance(b, true)}
-                                className={`px-2 py-0.5 rounded text-[11px] border ${
-                                  b.attended === true ? 'bg-emerald-600 text-white' : 'bg-white'
-                                }`}
-                              >
-                                Asistió
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleMarkAttendance(b, false)}
-                                className={`px-2 py-0.5 rounded text-[11px] border ${
-                                  b.attended === false ? 'bg-red-600 text-white' : 'bg-white'
-                                }`}
-                              >
-                                Faltó
-                              </button>
-                            </div>
-                          )}
+                          <div className="flex flex-wrap justify-end gap-1">
+                            {isMyTurn && (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => handleMarkAttendance(b, true)}
+                                  className={`px-2 py-0.5 rounded text-[11px] border ${
+                                    b.attended === true ? 'bg-emerald-600 text-white' : 'bg-white'
+                                  }`}
+                                >
+                                  Asistió
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleMarkAttendance(b, false)}
+                                  className={`px-2 py-0.5 rounded text-[11px] border ${
+                                    b.attended === false ? 'bg-red-600 text-white' : 'bg-white'
+                                  }`}
+                                >
+                                  Faltó
+                                </button>
+                              </>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => handleNotifyParents(b)}
+                              className="px-2 py-0.5 rounded text-[11px] font-medium bg-green-50 text-green-800 border border-green-300 hover:bg-green-100"
+                            >
+                              Avisar a padres
+                            </button>
+                          </div>
                         </div>
                       </div>
                     );
