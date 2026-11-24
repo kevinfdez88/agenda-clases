@@ -140,6 +140,13 @@ function isBookingCoveringHalfHour(
   return bStart < sEnd && bEnd > sStart;
 }
 
+function formatPricingDisplayName(item: PricingItem): string {
+  if (item.kind === 'hourly' && item.name.trim().toLowerCase() === 'hora suelta') {
+    return 'Hora individual';
+  }
+  return item.name;
+}
+
 export default function HomePage() {
   // Estado de autenticación y perfil actual
   const [authLoading, setAuthLoading] = useState(true);
@@ -469,7 +476,7 @@ export default function HomePage() {
     return peak;
   }, [activeBookings, bookTeacherId, bookDate, bookStartTime, requestedBlocks]);
 
-  // Gráfico tipo Gantt de media hora (14:00 a 21:00) por profesora y fecha
+  // Gráfico de carga horaria de media hora (14:00 a 21:00) por profesora y fecha
   const ganttRows = useMemo(() => {
     const targetDayOfWeek = ganttDate ? new Date(ganttDate + 'T12:00:00').getDay() : -1;
     const dayBookings = activeBookings.filter((b) => b.booking_date === ganttDate);
@@ -1533,10 +1540,10 @@ export default function HomePage() {
               </form>
             </section>
 
-            {/* ÚLTIMO CAMPO EN VISTA ALUMNO: PRECIOS DE HORAS SUELTAS Y COMBOS */}
+            {/* ÚLTIMO CAMPO EN VISTA ALUMNO: PRECIOS DE HORA INDIVIDUAL Y COMBOS */}
             <section className="bg-white border rounded-xl p-5 shadow-sm space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <h2 className="font-semibold text-base">4. Precios de Horas Sueltas y Combos</h2>
+                <h2 className="font-semibold text-base">4. Precios de Hora Individual y Combos</h2>
                 <span className="text-xs text-slate-500">
                   Valores de referencia. Al abonar, avisale a tu profesora para que cargue las horas.
                 </span>
@@ -1555,9 +1562,11 @@ export default function HomePage() {
                             : 'bg-sky-100 text-sky-800'
                         }`}
                       >
-                        {item.kind === 'combo' ? 'Combo' : 'Hora suelta'}
+                        {item.kind === 'combo' ? 'Combo' : 'Hora individual'}
                       </span>
-                      <div className="font-semibold text-sm text-slate-900">{item.name}</div>
+                      <div className="font-semibold text-sm text-slate-900">
+                        {formatPricingDisplayName(item)}
+                      </div>
                       <div className="text-xs text-slate-600">{item.hours_included} hora(s)</div>
                     </div>
                     <div className="text-lg font-bold text-emerald-700">
@@ -1578,12 +1587,12 @@ export default function HomePage() {
         {/* ==================== VISTA AUTOMÁTICA: PROFESORA ==================== */}
         {currentUserProfile.role === 'teacher' && (
           <div className="space-y-6">
-            {/* GRÁFICO TIPO GANTT CADA 30 MIN (14:00 A 21:00) */}
+            {/* DIAGRAMA DE CARGA HORARIA CADA 30 MIN (14:00 A 21:00) */}
             <section className="bg-white border rounded-xl p-5 shadow-sm space-y-4">
               <div className="flex flex-wrap items-end justify-between gap-4">
                 <div>
                   <h2 className="font-semibold text-lg">
-                    Diagrama de Carga Horaria por Profesora (Tipo Gantt • 30 min)
+                    Diagrama de Carga Horaria por Profesora
                   </h2>
                   <p className="text-xs text-slate-600">
                     Franja de 14:00 a 21:00 hs en bloques de 30 minutos • Cupo máximo:{' '}
@@ -1626,20 +1635,23 @@ export default function HomePage() {
               </div>
 
               <div className="overflow-x-auto border rounded-xl">
-                <table className="min-w-[1160px] w-full text-xs border-collapse">
+                <table className="min-w-[1620px] w-full text-xs border-collapse">
                   <thead>
                     <tr className="bg-slate-100 text-slate-700 border-b">
                       <th className="p-2.5 text-left font-semibold sticky left-0 bg-slate-100 z-10 min-w-[180px] border-r">
                         Profesora
                       </th>
-                      {GANTT_HALF_HOURS.map((slotStart) => (
-                        <th
-                          key={slotStart}
-                          className="p-2 text-center font-semibold border-r last:border-r-0 min-w-[74px]"
-                        >
-                          {slotStart}
-                        </th>
-                      ))}
+                      {GANTT_HALF_HOURS.map((slotStart) => {
+                        const slotEnd = addThirtyMinutes(slotStart);
+                        return (
+                          <th
+                            key={slotStart}
+                            className="p-2 text-center font-semibold border-r last:border-r-0 min-w-[104px] whitespace-nowrap"
+                          >
+                            {slotStart} a {slotEnd}
+                          </th>
+                        );
+                      })}
                     </tr>
                   </thead>
                   <tbody>
@@ -1666,7 +1678,7 @@ export default function HomePage() {
                           return (
                             <td
                               key={cell.slotStart}
-                              title={`${row.teacher.full_name} (${cell.slotStart}-${cell.slotEnd}): ${
+                              title={`${row.teacher.full_name} (${cell.slotStart} a ${cell.slotEnd}): ${
                                 cell.count
                               }/${cell.cap} alumnos${
                                 cell.studentNames.length > 0
@@ -2253,16 +2265,16 @@ export default function HomePage() {
               </div>
             </section>
 
-            {/* Precios de horas sueltas y combos */}
+            {/* Precios de hora individual y combos */}
             <section className="bg-white border rounded-xl p-5 shadow-sm space-y-3">
-              <h2 className="font-semibold text-base">Precios de Horas Sueltas y Combos</h2>
+              <h2 className="font-semibold text-base">Precios de Hora Individual y Combos</h2>
               <div className="grid sm:grid-cols-3 gap-4">
                 {pricing.map((item) => (
                   <div key={item.id} className="border rounded-lg p-4 space-y-2">
                     <div className="flex items-center justify-between gap-2">
-                      <div className="font-bold">{item.name}</div>
+                      <div className="font-bold">{formatPricingDisplayName(item)}</div>
                       <span className="text-[11px] px-2 py-0.5 rounded bg-slate-100 text-slate-600">
-                        {item.kind === 'combo' ? 'Combo' : 'Hora suelta'}
+                        {item.kind === 'combo' ? 'Combo' : 'Hora individual'}
                       </span>
                     </div>
                     <div className="text-xs text-slate-500">{item.hours_included} hora(s)</div>
