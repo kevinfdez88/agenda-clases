@@ -54,23 +54,27 @@ type Booking = {
   subjects?: { name: string } | null;
 };
 
+const TEACHER_MAX_CAPACITY = 4;
 const DAYS = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
-const GANTT_HOURS = [
-  '08:00',
-  '09:00',
-  '10:00',
-  '11:00',
-  '12:00',
-  '13:00',
-  '14:00',
-  '15:00',
-  '16:00',
-  '17:00',
-  '18:00',
-  '19:00',
-  '20:00',
-  '21:00',
-];
+
+function minutesToHHMM(totalMinutes: number): string {
+  const normalized = ((totalMinutes % 1440) + 1440) % 1440;
+  const h = Math.floor(normalized / 60);
+  const m = normalized % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+function getHalfHourSlots(startHHMM: string, endHHMM: string): string[] {
+  const startMin = Math.round(parseTimeToHours(startHHMM) * 60);
+  const endMin = Math.round(parseTimeToHours(endHHMM) * 60);
+  const slotsList: string[] = [];
+  for (let cur = startMin; cur < endMin; cur += 30) {
+    slotsList.push(minutesToHHMM(cur));
+  }
+  return slotsList;
+}
+
+const GANTT_HALF_HOURS = getHalfHourSlots('14:00', '21:00');
 
 function parseTimeToHours(hhmm: string): number {
   const [hStr, mStr] = hhmm.slice(0, 5).split(':');
@@ -81,7 +85,7 @@ function parseTimeToHours(hhmm: string): number {
 }
 
 function formatHoursDecimal(hoursVal: number): string {
-  const totalMinutes = Math.round(hoursVal * 60);
+  const totalMinutes = Math.round(Number(hoursVal || 0) * 60);
   const h = Math.floor(totalMinutes / 60);
   const m = totalMinutes % 60;
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')} hs`;
@@ -92,9 +96,7 @@ function getHourlyBlocks(startHHMM: string, endHHMM: string): string[] {
   const endMin = Math.round(parseTimeToHours(endHHMM) * 60);
   const blocks: string[] = [];
   for (let cur = startMin; cur < endMin; cur += 60) {
-    const h = Math.floor(cur / 60);
-    const m = cur % 60;
-    blocks.push(`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`);
+    blocks.push(minutesToHHMM(cur));
   }
   return blocks;
 }
@@ -102,9 +104,7 @@ function getHourlyBlocks(startHHMM: string, endHHMM: string): string[] {
 function computeEndTimeFromStartAndDuration(startHHMM: string, durationHours: number): string {
   const startMin = Math.round(parseTimeToHours(startHHMM) * 60);
   const endMin = startMin + Math.round(Number(durationHours || 1) * 60);
-  const h = Math.floor(endMin / 60);
-  const m = endMin % 60;
-  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  return minutesToHHMM(endMin);
 }
 
 function getBookingStartDate(bookingDate: string, startTime: string): Date {
@@ -114,9 +114,21 @@ function getBookingStartDate(bookingDate: string, startTime: string): Date {
   return new Date(yy, (mo || 1) - 1, dd || 1, hh || 0, mm || 0, 0, 0);
 }
 
-function addOneHour(hhmm: string): string {
-  const [h, m] = hhmm.slice(0, 5).split(':').map(Number);
-  return `${String((h + 1) % 24).padStart(2, '0')}:${String(m || 0).padStart(2, '0')}`;
+function addThirtyMinutes(hhmm: string): string {
+  const startMin = Math.round(parseTimeToHours(hhmm) * 60);
+  return minutesToHHMM(startMin + 30);
+}
+
+function isBookingCoveringHalfHour(
+  bStartHHMM: string,
+  bEndHHMM: string,
+  slotStartHHMM: string
+): boolean {
+  const bStart = Math.round(parseTimeToHours(bStartHHMM) * 60);
+  const bEnd = Math.round(parseTimeToHours(bEndHHMM) * 60);
+  const sStart = Math.round(parseTimeToHours(slotStartHHMM) * 60);
+  const sEnd = sStart + 30;
+  return bStart < sEnd && bEnd > sStart;
 }
 
 export default function HomePage() {
@@ -414,8 +426,7 @@ export default function HomePage() {
     return bookings.filter((b) => b.student_id === currentUserProfile.id);
   }, [bookings, currentUserProfile]);
 
-  const selectedBookTeacher = teachers.find((t) => t.id === bookTeacherId);
-  const maxCap = selectedBookTeacher?.max_capacity ?? 8;
+  const maxCap = TEACHER_MAX_CAPACITY;
 
   const maxOccupancyInRange = useMemo(() => {
     if (!bookTeacherId || !bookDate) return 0;
@@ -435,7 +446,7 @@ export default function HomePage() {
     return peak;
   }, [activeBookings, bookTeacherId, bookDate, bookStartTime, requestedBlocks]);
 
-  // Datos para gráfico tipo Gantt de carga por horario y profesora en la fecha elegida
+  // Gráfico tipo Gantt de media hora (14:00 a 21:00) por profesora y fecha
   const ganttRows = useMemo(() => {
     const targetDayOfWeek = ganttDate ? new Date(ganttDate + 'T12:00:00').getDay() : -1;
     const dayBookings = activeBookings.filter((b) => b.booking_date === ganttDate);
@@ -444,13 +455,18 @@ export default function HomePage() {
       const teacherDaySlots = slots.filter(
         (sl) => sl.teacher_id === t.id && sl.day_of_week === targetDayOfWeek && sl.is_active
       );
-      const cap = t.max_capacity ?? 8;
+      const cap = TEACHER_MAX_CAPACITY;
 
-      const cells = GANTT_HOURS.map((hourStart) => {
-        const hourEnd = addOneHour(hourStart);
-        const isEnabled = teacherDaySlots.some(
-          (sl) => hourStart >= sl.start_time.slice(0, 5) && hourEnd <= sl.end_time.slice(0, 5)
-        );
+      const cells = GANTT_HALF_HOURS.map((slotStart) => {
+        const slotEnd = addThirtyMinutes(slotStart);
+        const sStartMin = Math.round(parseTimeToHours(slotStart) * 60);
+        const sEndMin = sStartMin + 30;
+
+        const isEnabled = teacherDaySlots.some((sl) => {
+          const slStartMin = Math.round(parseTimeToHours(sl.start_time) * 60);
+          const slEndMin = Math.round(parseTimeToHours(sl.end_time) * 60);
+          return sStartMin >= slStartMin && sEndMin <= slEndMin;
+        });
 
         const matchingBookings = dayBookings.filter((b) => {
           if (b.teacher_id !== t.id) return false;
@@ -458,17 +474,15 @@ export default function HomePage() {
           const bEnd = b.end_time
             ? b.end_time.slice(0, 5)
             : computeEndTimeFromStartAndDuration(bStart, Number(b.duration_hours || 1));
-          return getHourlyBlocks(bStart, bEnd).includes(hourStart);
+          return isBookingCoveringHalfHour(bStart, bEnd, slotStart);
         });
 
-        const studentNames = matchingBookings.map(
-          (b) => b.profiles?.full_name || 'Alumno'
-        );
+        const studentNames = matchingBookings.map((b) => b.profiles?.full_name || 'Alumno');
         const hasOverride = matchingBookings.some((b) => b.is_override);
 
         return {
-          hourStart,
-          hourEnd,
+          slotStart,
+          slotEnd,
           isEnabled,
           count: matchingBookings.length,
           cap,
@@ -477,18 +491,20 @@ export default function HomePage() {
         };
       });
 
-      const totalBlockAssignments = cells.reduce((acc, c) => acc + c.count, 0);
+      const activeHalfHours = cells.filter((c) => c.count > 0).length;
+      const totalBookedHalfHourSlots = cells.reduce((acc, c) => acc + c.count, 0);
 
       return {
         teacher: t,
         cap,
-        totalBlockAssignments,
+        activeHalfHours,
+        totalBookedHalfHourSlots,
         cells,
       };
     });
   }, [teachers, slots, activeBookings, ganttDate]);
 
-  // Estadísticas por período (sin pagos)
+  // Resumen en HORAS (cada alumno que reserva suma la duración en horas de su turno)
   const filteredStats = useMemo(() => {
     const bookingsInRange = activeBookings.filter((b) => {
       const afterFrom = !statsFrom || b.booking_date >= statsFrom;
@@ -496,23 +512,31 @@ export default function HomePage() {
       return afterFrom && beforeTo;
     });
 
+    const totalHoursBooked = bookingsInRange.reduce(
+      (sum, b) => sum + Number(b.duration_hours || 1),
+      0
+    );
+
     const bySubject = subjects
       .map((s) => ({
         id: s.id,
         name: s.name,
-        count: bookingsInRange.filter((b) => b.subject_id === s.id).length,
+        hours: bookingsInRange
+          .filter((b) => b.subject_id === s.id)
+          .reduce((sum, b) => sum + Number(b.duration_hours || 1), 0),
       }))
-      .sort((a, b) => b.count - a.count);
+      .sort((a, b) => b.hours - a.hours);
 
     const byTeacher = teachers.map((t) => ({
       id: t.id,
       name: t.full_name,
-      count: bookingsInRange.filter((b) => b.teacher_id === t.id).length,
+      hours: bookingsInRange
+        .filter((b) => b.teacher_id === t.id)
+        .reduce((sum, b) => sum + Number(b.duration_hours || 1), 0),
     }));
 
     return {
-      totalTurns: bookingsInRange.length,
-      totalHoursBooked: bookingsInRange.reduce((sum, b) => sum + Number(b.duration_hours || 1), 0),
+      totalHoursBooked,
       bySubject,
       byTeacher,
     };
@@ -603,18 +627,16 @@ export default function HomePage() {
     }
 
     for (const blk of requestedBlocks) {
-      const { data: hasSpace, error: capErr } = await supabase.rpc('check_slot_capacity', {
-        p_teacher_id: bookTeacherId,
-        p_date: bookDate,
-        p_start_time: blk + ':00',
-        p_force_override: false,
-      });
+      const currentBlockCount = activeBookings.filter((b) => {
+        if (b.teacher_id !== bookTeacherId || b.booking_date !== bookDate) return false;
+        const bStart = b.start_time.slice(0, 5);
+        const bEnd = b.end_time
+          ? b.end_time.slice(0, 5)
+          : computeEndTimeFromStartAndDuration(bStart, Number(b.duration_hours || 1));
+        return getHourlyBlocks(bStart, bEnd).includes(blk);
+      }).length;
 
-      if (capErr) {
-        setBanner({ type: 'err', text: capErr.message });
-        return;
-      }
-      if (!hasSpace) {
+      if (currentBlockCount >= maxCap) {
         setBanner({
           type: 'err',
           text: `Cupo lleno (${maxCap}/${maxCap}) en el bloque ${blk}. Solo una profesora puede habilitar una excepción.`,
@@ -747,17 +769,19 @@ export default function HomePage() {
     e.preventDefault();
     if (!urgentName.trim() || !urgentTeacherId || !urgentSubjectId || !urgentDate) return;
 
-    const { data: hasSpace } = await supabase.rpc('check_slot_capacity', {
-      p_teacher_id: urgentTeacherId,
-      p_date: urgentDate,
-      p_start_time: urgentTime + ':00',
-      p_force_override: forceOverride,
-    });
+    const currentOcc = activeBookings.filter((b) => {
+      if (b.teacher_id !== urgentTeacherId || b.booking_date !== urgentDate) return false;
+      const bStart = b.start_time.slice(0, 5);
+      const bEnd = b.end_time
+        ? b.end_time.slice(0, 5)
+        : computeEndTimeFromStartAndDuration(bStart, Number(b.duration_hours || 1));
+      return getHourlyBlocks(bStart, bEnd).includes(urgentTime.slice(0, 5));
+    }).length;
 
-    if (!hasSpace) {
+    if (currentOcc >= TEACHER_MAX_CAPACITY && !forceOverride) {
       setBanner({
         type: 'err',
-        text: 'Cupo lleno para ese horario. Tildá "Forzar excepción de cupo" para inscribir igual.',
+        text: `Cupo lleno (${TEACHER_MAX_CAPACITY}/${TEACHER_MAX_CAPACITY}) para ese horario. Tildá "Forzar excepción de cupo" para inscribir igual.`,
       });
       return;
     }
@@ -1085,8 +1109,8 @@ export default function HomePage() {
   const upcomingBookings = activeBookings.filter((b) => !todayStr || b.booking_date >= todayStr);
   const pastBookings = activeBookings.filter((b) => Boolean(todayStr) && b.booking_date < todayStr);
   const mySlots = slots.filter((sl) => sl.teacher_id === currentUserProfile.id);
-  const maxSubjectTurns = Math.max(1, ...filteredStats.bySubject.map((x) => x.count));
-  const maxTeacherTurns = Math.max(1, ...filteredStats.byTeacher.map((x) => x.count));
+  const maxSubjectHours = Math.max(0.5, ...filteredStats.bySubject.map((x) => x.hours));
+  const maxTeacherHours = Math.max(0.5, ...filteredStats.byTeacher.map((x) => x.hours));
   const ganttDayName = ganttDate ? DAYS[new Date(ganttDate + 'T12:00:00').getDay()] : '';
 
   return (
@@ -1216,7 +1240,7 @@ export default function HomePage() {
                   </label>
                   <input
                     type="time"
-                    step={3600}
+                    step={1800}
                     value={bookStartTime}
                     onChange={(e) => {
                       setBookStartTime(e.target.value);
@@ -1232,7 +1256,7 @@ export default function HomePage() {
                   </label>
                   <input
                     type="time"
-                    step={3600}
+                    step={1800}
                     value={bookEndTime}
                     onChange={(e) => {
                       setBookEndTime(e.target.value);
@@ -1449,16 +1473,16 @@ export default function HomePage() {
         {/* ==================== VISTA AUTOMÁTICA: PROFESORA ==================== */}
         {currentUserProfile.role === 'teacher' && (
           <div className="space-y-6">
-            {/* GRÁFICO TIPO GANTT: CARGA POR HORARIO Y PROFESORA */}
+            {/* GRÁFICO TIPO GANTT CADA 30 MIN (14:00 A 21:00) */}
             <section className="bg-white border rounded-xl p-5 shadow-sm space-y-4">
               <div className="flex flex-wrap items-end justify-between gap-4">
                 <div>
                   <h2 className="font-semibold text-lg">
-                    Diagrama de Carga Horaria por Profesora (Tipo Gantt)
+                    Diagrama de Carga Horaria por Profesora (Tipo Gantt • 30 min)
                   </h2>
                   <p className="text-xs text-slate-600">
-                    Visualizá qué franjas están habilitadas, cuántos alumnos hay en cada hora y qué
-                    alumnos ocupan el cupo.
+                    Franja de 14:00 a 21:00 hs en bloques de 30 minutos • Cupo máximo:{' '}
+                    {TEACHER_MAX_CAPACITY} alumnos por profesora.
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2 text-sm">
@@ -1488,7 +1512,7 @@ export default function HomePage() {
                 </span>
                 <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-rose-50 border border-rose-200 text-rose-900">
                   <span className="w-2.5 h-2.5 rounded-sm bg-rose-500 inline-block" />
-                  Cupo completo / Excepción
+                  Cupo completo ({TEACHER_MAX_CAPACITY}/{TEACHER_MAX_CAPACITY}) / Excepción
                 </span>
                 <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-100 border border-slate-200 text-slate-600">
                   <span className="w-2.5 h-2.5 rounded-sm bg-slate-300 inline-block" />
@@ -1497,18 +1521,18 @@ export default function HomePage() {
               </div>
 
               <div className="overflow-x-auto border rounded-xl">
-                <table className="min-w-[980px] w-full text-xs border-collapse">
+                <table className="min-w-[1160px] w-full text-xs border-collapse">
                   <thead>
                     <tr className="bg-slate-100 text-slate-700 border-b">
                       <th className="p-2.5 text-left font-semibold sticky left-0 bg-slate-100 z-10 min-w-[180px] border-r">
                         Profesora
                       </th>
-                      {GANTT_HOURS.map((h) => (
+                      {GANTT_HALF_HOURS.map((slotStart) => (
                         <th
-                          key={h}
+                          key={slotStart}
                           className="p-2 text-center font-semibold border-r last:border-r-0 min-w-[74px]"
                         >
-                          {h}
+                          {slotStart}
                         </th>
                       ))}
                     </tr>
@@ -1519,7 +1543,8 @@ export default function HomePage() {
                         <td className="p-2.5 font-semibold sticky left-0 bg-white z-10 border-r align-top">
                           <div>{row.teacher.full_name}</div>
                           <div className="text-[11px] font-normal text-slate-500 mt-0.5">
-                            Cupo máx: {row.cap} • Bloques ocupados: {row.totalBlockAssignments}
+                            Cupo máx: {row.cap} • Tramos ocupados: {row.activeHalfHours} (
+                            {formatHoursDecimal(row.totalBookedHalfHourSlots * 0.5)})
                           </div>
                         </td>
                         {row.cells.map((cell) => {
@@ -1535,8 +1560,8 @@ export default function HomePage() {
 
                           return (
                             <td
-                              key={cell.hourStart}
-                              title={`${row.teacher.full_name} (${cell.hourStart}-${cell.hourEnd}): ${
+                              key={cell.slotStart}
+                              title={`${row.teacher.full_name} (${cell.slotStart}-${cell.slotEnd}): ${
                                 cell.count
                               }/${cell.cap} alumnos${
                                 cell.studentNames.length > 0
@@ -1546,7 +1571,7 @@ export default function HomePage() {
                               className="p-1 border-r last:border-r-0 align-top"
                             >
                               <div
-                                className={`rounded-md border p-1.5 min-h-[54px] flex flex-col justify-between ${cellClasses}`}
+                                className={`rounded-md border p-1.5 min-h-[58px] flex flex-col justify-between ${cellClasses}`}
                               >
                                 <div className="flex items-center justify-between font-bold text-[11px]">
                                   <span>
@@ -1666,13 +1691,14 @@ export default function HomePage() {
               </div>
             </section>
 
-            {/* SECTOR DE ESTADÍSTICAS DE TURNOS POR PERÍODO */}
+            {/* RESUMEN EN HORAS POR PERÍODO */}
             <section className="bg-white border rounded-xl p-5 shadow-sm space-y-5">
               <div className="flex flex-wrap items-end justify-between gap-4">
                 <div>
-                  <h2 className="font-semibold text-lg">Resumen de Clases por Período</h2>
+                  <h2 className="font-semibold text-lg">Resumen de Clases por Período (en Horas)</h2>
                   <p className="text-xs text-slate-600">
-                    Cantidad de turnos, horas reservadas, materias y carga por profesora
+                    Cada alumno que solicita una clase suma su duración en horas (ej: 2 alumnos de 1h
+                    en la misma materia y horario = 02:00 hs).
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2 text-sm">
@@ -1693,37 +1719,29 @@ export default function HomePage() {
                 </div>
               </div>
 
-              <div className="grid sm:grid-cols-2 gap-4">
-                <div className="p-4 rounded-xl bg-blue-50 border border-blue-200">
-                  <div className="text-xs text-blue-800 font-medium">Turnos Activos en Período</div>
-                  <div className="text-2xl font-bold text-blue-950 mt-1">
-                    {filteredStats.totalTurns}
-                  </div>
+              <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200">
+                <div className="text-xs text-emerald-800 font-medium">
+                  Horas Totales Agendadas en Período
                 </div>
-                <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200">
-                  <div className="text-xs text-emerald-800 font-medium">
-                    Horas Totales Agendadas
-                  </div>
-                  <div className="text-2xl font-bold text-emerald-950 mt-1">
-                    {formatHoursDecimal(filteredStats.totalHoursBooked)}
-                  </div>
+                <div className="text-2xl font-bold text-emerald-950 mt-1">
+                  {formatHoursDecimal(filteredStats.totalHoursBooked)}
                 </div>
               </div>
 
               <div className="grid md:grid-cols-2 gap-6 text-sm">
                 <div className="border rounded-xl p-4 space-y-3">
-                  <h3 className="font-semibold">Materias Más Concurridas</h3>
+                  <h3 className="font-semibold">Horas por Materia</h3>
                   <div className="space-y-2">
                     {filteredStats.bySubject.map((sub) => (
                       <div key={sub.id}>
                         <div className="flex justify-between text-xs mb-1">
                           <span>{sub.name}</span>
-                          <strong>{sub.count} turno(s)</strong>
+                          <strong>{formatHoursDecimal(sub.hours)}</strong>
                         </div>
                         <div className="w-full bg-slate-100 rounded-full h-2.5 overflow-hidden">
                           <div
                             className="bg-indigo-600 h-2.5"
-                            style={{ width: `${Math.round((sub.count / maxSubjectTurns) * 100)}%` }}
+                            style={{ width: `${Math.round((sub.hours / maxSubjectHours) * 100)}%` }}
                           />
                         </div>
                       </div>
@@ -1732,18 +1750,18 @@ export default function HomePage() {
                 </div>
 
                 <div className="border rounded-xl p-4 space-y-3">
-                  <h3 className="font-semibold">Turnos por Profesora</h3>
+                  <h3 className="font-semibold">Horas por Profesora</h3>
                   <div className="space-y-2">
                     {filteredStats.byTeacher.map((tc) => (
                       <div key={tc.id}>
                         <div className="flex justify-between text-xs mb-1">
                           <span>{tc.name}</span>
-                          <strong>{tc.count} turno(s)</strong>
+                          <strong>{formatHoursDecimal(tc.hours)}</strong>
                         </div>
                         <div className="w-full bg-slate-100 rounded-full h-2.5 overflow-hidden">
                           <div
                             className="bg-amber-500 h-2.5"
-                            style={{ width: `${Math.round((tc.count / maxTeacherTurns) * 100)}%` }}
+                            style={{ width: `${Math.round((tc.hours / maxTeacherHours) * 100)}%` }}
                           />
                         </div>
                       </div>
@@ -1806,7 +1824,7 @@ export default function HomePage() {
                 />
                 <input
                   type="time"
-                  step={3600}
+                  step={1800}
                   value={urgentTime}
                   onChange={(e) => setUrgentTime(e.target.value)}
                   className="border rounded-lg px-3 py-2 text-sm"
@@ -1818,7 +1836,8 @@ export default function HomePage() {
                       checked={forceOverride}
                       onChange={(e) => setForceOverride(e.target.checked)}
                     />
-                    Forzar excepción de cupo (permitir alumno excedente por encima de 8)
+                    Forzar excepción de cupo (permitir alumno excedente por encima de{' '}
+                    {TEACHER_MAX_CAPACITY})
                   </label>
                   <button
                     type="submit"
